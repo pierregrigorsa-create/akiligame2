@@ -1,0 +1,1315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="theme-color" content="#0d0b26">
+  <title>Akili Match</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@700;800;900&display=swap" rel="stylesheet">
+  <style>*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}html,body,#root{height:100%;width:100%;overflow:hidden;background:#0d0b26;}</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+/* ══════════════════════════ SOUND ENGINE ══════════════════════════ */
+const SFX = (() => {
+  let ctx=null,muted=false;
+  const go=()=>{if(!ctx)ctx=new(window.AudioContext||window.webkitAudioContext)();if(ctx.state==='suspended')ctx.resume();return ctx;};
+  const tone=(freq,type='sine',vol=0.11,dur=0.18,delay=0,c=null)=>{const ac=c||go(),osc=ac.createOscillator(),g=ac.createGain();osc.connect(g);g.connect(ac.destination);osc.type=type;osc.frequency.setValueAtTime(freq,ac.currentTime+delay);g.gain.setValueAtTime(0.001,ac.currentTime+delay);g.gain.linearRampToValueAtTime(vol,ac.currentTime+delay+0.015);g.gain.exponentialRampToValueAtTime(0.001,ac.currentTime+delay+dur);osc.start(ac.currentTime+delay);osc.stop(ac.currentTime+delay+dur+0.05);};
+  const p=(fn)=>{if(!muted)try{fn();}catch(e){}};
+  return{
+    setMute:v=>{muted=v;},
+    tap:    ()=>p(()=>tone(600,'sine',0.07,0.07)),
+    select: ()=>p(()=>tone(440,'sine',0.09,0.1)),
+    invalid:()=>p(()=>{const c=go();tone(180,'sine',0.1,0.15,0,c);tone(140,'sine',0.07,0.12,0.1,c);}),
+    match:  ()=>p(()=>{const c=go();tone(523,'sine',0.11,0.14,0,c);tone(659,'sine',0.09,0.12,0.08,c);}),
+    correct:()=>p(()=>{const c=go();tone(659,'sine',0.13,0.18,0,c);tone(784,'sine',0.11,0.15,0.09,c);tone(1047,'sine',0.1,0.2,0.18,c);}),
+    combo:  ()=>p(()=>{const c=go();[523,659,784,1047].forEach((f,i)=>tone(f,'sine',0.13,0.18,i*0.09,c));}),
+    wrong:  ()=>p(()=>{const c=go();tone(280,'sine',0.13,0.25,0,c);tone(200,'sine',0.09,0.2,0.22,c);}),
+    win:    ()=>p(()=>{const c=go();[523,659,784,1047,1319].forEach((f,i)=>tone(f,'sine',0.16,0.35,i*0.1,c));}),
+    lose:   ()=>p(()=>{const c=go();[440,392,349,311].forEach((f,i)=>tone(f,'sine',0.11,0.25,i*0.13,c));}),
+    study:  ()=>p(()=>{const c=go();tone(330,'sine',0.13,0.4,0,c);tone(294,'sine',0.09,0.3,0.32,c);}),
+    pop:    ()=>p(()=>tone(800,'sine',0.15,0.08)),
+    levelup:()=>p(()=>{const c=go();tone(784,'sine',0.12,0.15,0,c);tone(1047,'sine',0.14,0.2,0.12,c);}),
+  };
+})();
+
+/* ══════════════════════════ CONSTANTS ══════════════════════════ */
+const SICONS={Maths:["➕","✖️","➗","🔢"],Science:["🔬","⚗️","🧬","🌡️"],English:["📖","✏️","📝","🔤"],Geography:["🌍","🏔️","🌊","🏜️"],Arts:["🎨","🖌️","🎵","🎭"],History:["🏛️","⚔️","📜","🎖️"]};
+const TC=[{bg:"#2563EB",sh:"#93C5FD"},{bg:"#DC2626",sh:"#FCA5A5"},{bg:"#D97706",sh:"#FCD34D"},{bg:"#7C3AED",sh:"#C4B5FD"}];
+const GRADE_ORDER=['foundation','intermediate','senior','fet'];
+const GRADES=[{key:"foundation",label:"Grade 1–3",icon:"🌱",sub:"Foundation Phase"},{key:"intermediate",label:"Grade 4–6",icon:"📚",sub:"Intermediate Phase"},{key:"senior",label:"Grade 7–9",icon:"🔬",sub:"Senior Phase"},{key:"fet",label:"Grade 10–12",icon:"🎓",sub:"FET Phase"}];
+const PACK_SIZE=25,MAX_PACKS=30;
+function abbr(t,G){if(!t)return"";if(G>=8)return"";const m=G===7?5:7;if(t.length<=m)return t;const w=t.trim().split(/[\s,&+/\-]+/);if(w.length>1){const a=w.map(x=>x[0]?.toUpperCase()||"").join("");if(a.length<=m)return a;}return t.slice(0,m);}
+const uid=()=>Math.random().toString(36).slice(2,9);
+const wait=ms=>new Promise(ok=>setTimeout(ok,ms));
+const CC=["#FFD700","#FF6B6B","#4ECDC4","#C4B5FD","#FCD34D","#fff"];
+
+/* ══════════════════════════ QUESTION BANK ══════════════════════════
+   Each question has a stable id for no-repeat tracking.
+   ~12 per subject per grade = ~288 total questions
+══════════════════════════════════════════════════════════════════ */
+function makeQ(id,q,opts,a){return{id,q,opts,a};}
+const QBANK={
+foundation:{
+Maths:[
+  makeQ('fm1',"What is 3 + 4?",["5","6","7","8"],2),
+  makeQ('fm2',"What is 10 − 3?",["5","6","7","8"],2),
+  makeQ('fm3',"Sides on a triangle?",["2","3","4","5"],1),
+  makeQ('fm4',"What is 2 × 5?",["7","8","10","12"],2),
+  makeQ('fm5',"Number after 19?",["17","18","20","21"],2),
+  makeQ('fm6',"Half of 12 is?",["4","5","6","8"],2),
+  makeQ('fm7',"What is 5 + 5?",["8","9","10","11"],2),
+  makeQ('fm8',"What is 8 − 2?",["4","5","6","7"],2),
+  makeQ('fm9',"What is 3 × 3?",["6","7","8","9"],3),
+  makeQ('fm10',"Count by 2s: 2,4,6,___?",["7","8","9","10"],1),
+  makeQ('fm11',"What shape has 4 equal sides?",["Triangle","Circle","Square","Rectangle"],2),
+  makeQ('fm12',"What is double 7?",["12","13","14","15"],2),
+],
+Science:[
+  makeQ('fs1',"Which animal says 'moo'?",["Dog","Cat","Cow","Horse"],2),
+  makeQ('fs2',"Legs on a spider?",["4","6","8","10"],2),
+  makeQ('fs3',"Sunny sky colour?",["Green","Blue","Red","Yellow"],1),
+  makeQ('fs4',"Which animal lays eggs?",["Dog","Cat","Bird","Rabbit"],2),
+  makeQ('fs5',"Plants need ___ to grow?",["Juice","Milk","Water","Sand"],2),
+  makeQ('fs6',"Where do fish live?",["Trees","Soil","Water","Air"],2),
+  makeQ('fs7',"Word for a baby cat?",["Puppy","Kitten","Calf","Chick"],1),
+  makeQ('fs8',"What do we breathe?",["Water","Fire","Air","Soil"],2),
+  makeQ('fs9',"Fastest land animal?",["Elephant","Cheetah","Horse","Lion"],1),
+  makeQ('fs10',"How many seasons are there?",["2","3","4","5"],2),
+  makeQ('fs11',"Birds are kept warm by?",["Scales","Feathers","Fur","Shell"],1),
+  makeQ('fs12',"Which planet do we live on?",["Mars","Jupiter","Earth","Venus"],2),
+],
+English:[
+  makeQ('fe1',"Rhymes with 'cat'?",["Dog","Hat","Cup","Sun"],1),
+  makeQ('fe2',"Letters in 'HELLO'?",["3","4","5","6"],2),
+  makeQ('fe3',"Letter after D?",["B","C","E","F"],2),
+  makeQ('fe4',"Word for a baby dog?",["Kitten","Calf","Puppy","Foal"],2),
+  makeQ('fe5',"Which word is a colour?",["Run","Jump","Blue","Swim"],2),
+  makeQ('fe6',"Opposite of 'big'?",["Tall","Fast","Small","Slow"],2),
+  makeQ('fe7',"Which word is a verb?",["Apple","Run","Blue","Happy"],1),
+  makeQ('fe8',"Plural of 'child'?",["Childs","Children","Childen","Childer"],1),
+  makeQ('fe9',"Synonym for 'big'?",["Tiny","Small","Large","Short"],2),
+  makeQ('fe10',"Rhymes with 'dog'?",["Cat","Fog","Hat","Rat"],1),
+  makeQ('fe11',"Opposite of 'hot'?",["Warm","Cool","Cold","Wet"],2),
+  makeQ('fe12',"Which word is a number?",["Blue","Run","Seven","Happy"],2),
+],
+Geography:[
+  makeQ('fg1',"SA is on which continent?",["Asia","Europe","Africa","Australia"],2),
+  makeQ('fg2',"Name of our country?",["Nigeria","Kenya","Zimbabwe","South Africa"],3),
+  makeQ('fg3',"Ocean on SA's west coast?",["Indian","Atlantic","Pacific","Arctic"],1),
+  makeQ('fg4',"What is Gauteng?",["A river","A province","A country","A city"],1),
+  makeQ('fg5',"Cape Town is in?",["Gauteng","KZN","Western Cape","Limpopo"],2),
+  makeQ('fg6',"What is a desert?",["Wet forest","Snowy land","Very dry land","Deep ocean"],2),
+  makeQ('fg7',"Ocean on SA's east coast?",["Atlantic","Indian","Pacific","Southern"],1),
+  makeQ('fg8',"SA's largest city?",["Cape Town","Pretoria","Durban","Johannesburg"],3),
+  makeQ('fg9',"A map's key explains?",["Colours","Symbols","Scale","North"],1),
+  makeQ('fg10',"Where does a river flow to?",["Mountain","Desert","Sea","Sky"],2),
+  makeQ('fg11',"What is a continent?",["A country","A large landmass","An ocean","A city"],1),
+  makeQ('fg12',"How many continents on Earth?",["5","6","7","8"],2),
+],
+Arts:[
+  makeQ('fa1',"Primary colours?",["Green,Orange","Red,Blue,Yellow","Black,White","Purple,Pink"],1),
+  makeQ('fa2',"Red + blue = ?",["Green","Orange","Purple","Yellow"],2),
+  makeQ('fa3',"Instrument with keys?",["Guitar","Violin","Piano","Flute"],2),
+  makeQ('fa4',"Drums are played with?",["Bow","Fingers","Sticks","Mouth"],2),
+  makeQ('fa5',"Yellow + blue = ?",["Orange","Green","Purple","Brown"],1),
+  makeQ('fa6',"A sculpture is?",["Flat painting","3D artwork","A song","A dance"],1),
+  makeQ('fa7',"Mix yellow and red to get?",["Purple","Orange","Brown","Pink"],1),
+  makeQ('fa8',"How many strings on a violin?",["3","4","5","6"],1),
+  makeQ('fa9',"What is a solo?",["Group music","One person singing","A drum beat","A dance"],1),
+  makeQ('fa10',"Blue is a ___ colour?",["Warm","Cool","Neutral","Dark"],1),
+  makeQ('fa11',"A portrait painting shows?",["A landscape","A person's face","Animals","Abstract shapes"],1),
+  makeQ('fa12',"What colour do you get mixing all paints?",["White","Grey","Black","Brown"],2),
+],
+History:[
+  makeQ('fh1',"SA's national flower is the?",['Aloe','King Protea','Sunflower','Daisy'],1),
+  makeQ('fh2',"SA's national bird is the?",['Eagle','Flamingo','Blue Crane','Owl'],2),
+  makeQ('fh3',"SA's national animal is the?",['Lion','Elephant','Springbok','Cheetah'],2),
+  makeQ('fh4',"Heritage Day celebrates?",["Christmas","Our cultures","New Year","Easter"],1),
+  makeQ('fh5',"Who helps us when there is a fire?",['Teacher','Pilot','Firefighter','Farmer'],2),
+  makeQ('fh6',"The Springbok is?",["A bird","SA rugby symbol","A tree","A fish"],1),
+  makeQ('fh7',"SA hosted FIFA World Cup in?",["2006","2010","2014","2018"],1),
+  makeQ('fh8',"Ubuntu means?",["Working alone","A computer","Community spirit","A song"],2),
+  makeQ('fh9',"What colour is at the top of the SA flag?",['Blue','Green','Red','Black'],2),
+  makeQ('fh10',"What is the SA flag's green 'Y'?",["Mountains","Path of unity","The sea","Crops"],1),
+  makeQ('fh11',"What do we call someone who grows our food?",['Teacher','Farmer','Doctor','Driver'],1),
+  makeQ('fh12',"What do we use to remember the past?",['Television','Old photographs','Computers','Phones'],1),
+],
+},
+intermediate:{
+Maths:[
+  makeQ('im1',"What is 7 × 8?",["48","54","56","64"],2),
+  makeQ('im2',"15% of 200 = ?",["20","25","30","35"],2),
+  makeQ('im3',"¾ of 80 = ?",["40","50","60","70"],2),
+  makeQ('im4',"144 ÷ 12 = ?",["10","11","12","13"],2),
+  makeQ('im5',"Area: 5cm × 8cm = ?",["13cm²","30cm²","40cm²","45cm²"],2),
+  makeQ('im6',"25% of 400 = ?",["75","100","125","150"],1),
+  makeQ('im7',"What is 9 × 9?",["72","81","90","99"],1),
+  makeQ('im8',"What is 12²?",["120","124","144","148"],2),
+  makeQ('im9',"What is 50% of 180?",["60","80","90","100"],2),
+  makeQ('im10',"Perimeter of a square with side 7cm?",["14cm","21cm","28cm","49cm"],2),
+  makeQ('im11',"What is 1000 ÷ 25?",["30","40","50","60"],1),
+  makeQ('im12',"What is ⅔ of 60?",["20","30","40","50"],2),
+],
+Science:[
+  makeQ('is1',"Closest planet to Sun?",["Venus","Mars","Mercury","Earth"],2),
+  makeQ('is2',"Symbol for water?",["WA","H₂O","HO₂","H₂"],1),
+  makeQ('is3',"Bones in adult body?",["196","206","216","226"],1),
+  makeQ('is4',"Gas for photosynthesis?",["O₂","N₂","CO₂","H₂"],2),
+  makeQ('is5',"Largest body organ?",["Heart","Brain","Liver","Skin"],3),
+  makeQ('is6',"Planets in solar system?",["7","8","9","10"],1),
+  makeQ('is7',"Which planet has rings?",["Mars","Jupiter","Saturn","Neptune"],2),
+  makeQ('is8',"Largest planet in solar system?",["Saturn","Jupiter","Neptune","Uranus"],1),
+  makeQ('is9',"What is the function of the heart?",["Digest food","Pump blood","Filter air","Store energy"],1),
+  makeQ('is10',"An animal that eats plants only is called?",["Carnivore","Omnivore","Herbivore","Predator"],2),
+  makeQ('is11',"What do plants produce in photosynthesis?",["CO₂","Water","Oxygen","Nitrogen"],2),
+  makeQ('is12',"The moon takes how long to orbit Earth?",["1 day","1 week","1 month","1 year"],2),
+],
+English:[
+  makeQ('ie1',"Which word is a noun?",["Quickly","Beautiful","School","Run"],2),
+  makeQ('ie2',"Past tense of 'run'?",["Runned","Ran","Ranned","Runs"],1),
+  makeQ('ie3',"Synonym for 'happy'?",["Sad","Angry","Joyful","Tired"],2),
+  makeQ('ie4',"An adjective is a?",["Action word","Naming word","Describing word","Joining word"],2),
+  makeQ('ie5',"Correct spelling?",["Accomodation","Accommodation","Acommodation","Acomodation"],1),
+  makeQ('ie6',"Antonym of 'brave'?",["Bold","Cowardly","Strong","Fierce"],1),
+  makeQ('ie7',"Which is a pronoun?",["School","Running","She","Quickly"],2),
+  makeQ('ie8',"'The dog barked loudly.' The verb is?",["Dog","Barked","Loudly","The"],1),
+  makeQ('ie9',"Plural of 'mouse'?",["Mouses","Mousey","Mice","Meese"],2),
+  makeQ('ie10',"What punctuation ends a question?",["Full stop","Comma","Question mark","Exclamation"],2),
+  makeQ('ie11',"Synonym for 'begin'?",["End","Start","Stop","Pause"],1),
+  makeQ('ie12',"Which word is an adverb?",["Fast","Run","Blue","Table"],0),
+],
+Geography:[
+  makeQ('ig1',"Executive capital of SA?",["Cape Town","Pretoria","Joburg","Bloemfontein"],1),
+  makeQ('ig2',"SA province count?",["7","8","9","10"],2),
+  makeQ('ig3',"Longest river in Africa?",["Congo","Nile","Niger","Zambezi"],1),
+  makeQ('ig4',"The Great Karoo is a?",["Mountain","Forest","Semi-desert","River"],2),
+  makeQ('ig5',"Kruger Park is in?",["Limpopo/Mpum","Gauteng","KZN","Free State"],0),
+  makeQ('ig6',"SA's currency?",["Dollar","Pound","Rand","Euro"],2),
+  makeQ('ig7',"Judicial capital of SA?",["Pretoria","Cape Town","Joburg","Bloemfontein"],3),
+  makeQ('ig8',"Legislative capital of SA?",["Pretoria","Cape Town","Joburg","Bloemfontein"],1),
+  makeQ('ig9',"The Drakensberg is a?",["River","Desert","Mountain range","Forest"],2),
+  makeQ('ig10',"Which ocean surrounds SA on the south?",["Indian","Atlantic","Southern","Pacific"],2),
+  makeQ('ig11',"SA shares a border with?",["Kenya","Zimbabwe","Ethiopia","Angola"],1),
+  makeQ('ig12',"Table Mountain is in?",["Durban","Joburg","Cape Town","Pretoria"],2),
+],
+Arts:[
+  makeQ('ia1',"Primary paint colours?",["R,G,B","R,Y,B","O,P,G","Blk,Wh,Gy"],1),
+  makeQ('ia2',"Red + blue = ?",["Green","Orange","Purple","Brown"],2),
+  makeQ('ia3',"Still life painting shows?",["Seascape","Arranged objects","Portrait","Abstract"],1),
+  makeQ('ia4',"Strings on guitar?",["4","5","6","7"],2),
+  makeQ('ia5',"Tempo in music = ?",["Volume","Speed","Pitch","Rhythm"],1),
+  makeQ('ia6',"Opposite of warm colours?",["Bright","Cool colours","Dark","Neutral"],1),
+  makeQ('ia7',"Mixing all light colours gives?",["Black","White","Grey","Brown"],1),
+  makeQ('ia8',"What does a composer do?",["Paint","Dance","Write music","Sculpt"],2),
+  makeQ('ia9',"What is rhythm in music?",["Tune","Beat pattern","Volume","Instrument"],1),
+  makeQ('ia10',"Watercolour painting uses?",["Oil","Water-based paint","Chalk","Charcoal"],1),
+  makeQ('ia11',"An octave contains how many notes?",["5","6","7","8"],3),
+  makeQ('ia12',"Green is made by mixing?",["Red+Blue","Blue+Yellow","Red+Yellow","Orange+Blue"],1),
+],
+History:[
+  makeQ('ih1',"SA's first universal suffrage election?",["1990","1992","1994","1996"],2),
+  makeQ('ih2',"SA's 1st democratically elected president?",["T. Mbeki","F.W. de Klerk","N. Mandela","W. Sisulu"],2),
+  makeQ('ih3',"Apartheid was a system of?",["Sport competition","Racial segregation by law","Cultural celebration","Land reform"],1),
+  makeQ('ih4',"Mandela freed in?",["1988","1989","1990","1991"],2),
+  makeQ('ih5',"ANC stands for?",["African Nat. Congress","Afr. Native Council","All Nations Cong","Afr. New Cong"],0),
+  makeQ('ih6',"Soweto Uprising year?",["1974","1976","1978","1980"],1),
+  makeQ('ih7',"Freedom Charter written in?",["1953","1955","1957","1960"],1),
+  makeQ('ih8',"Year ALL SA citizens first voted?",["1990","1992","1994","1996"],2),
+  makeQ('ih9',"The TRC stood for?",["Truth & Reconciliation Commission","Tax Revenue Collection","Trade Relations Council","Transition Reform Committee"],0),
+  makeQ('ih10',"Who was Oliver Tambo?",["SA president","ANC leader in exile","Apartheid president","Rugby player"],1),
+  makeQ('ih11',"Sharpeville massacre year?",["1956","1960","1964","1968"],1),
+  makeQ('ih12',"SA became a republic in?",["1948","1961","1966","1976"],1),
+],
+},
+senior:{
+Maths:[
+  makeQ('sm1',"√144 = ?",["10","11","12","14"],2),
+  makeQ('sm2',"3x = 27 → x = ?",["7","8","9","10"],2),
+  makeQ('sm3',"2⁴ = ?",["8","12","16","20"],2),
+  makeQ('sm4',"Gradient of y=3x+2?",["2","3","5","6"],1),
+  makeQ('sm5',"Circumference r=7 (π=22/7)?",["22","44","66","88"],1),
+  makeQ('sm6',"2x + 5 = 17 → x = ?",["4","5","6","7"],2),
+  makeQ('sm7',"Area of circle r=5 (π=3.14)?",["31.4","62.8","78.5","157"],2),
+  makeQ('sm8',"What is the HCF of 12 and 18?",["2","3","6","9"],2),
+  makeQ('sm9',"Sum of angles in a triangle?",["90°","120°","180°","360°"],2),
+  makeQ('sm10',"x² = 49 → x = ?",["5","6","7","8"],2),
+  makeQ('sm11',"What is the LCM of 4 and 6?",["8","10","12","24"],2),
+  makeQ('sm12',"What is 3⁻¹?",["−3","⅓","3","−⅓"],1),
+],
+Science:[
+  makeQ('ss1',"Powerhouse of cell?",["Nucleus","Ribosome","Mitochondria","Chloroplast"],2),
+  makeQ('ss2',"Atomic number of Carbon?",["4","6","8","12"],1),
+  makeQ('ss3',"H₂SO₄ is?",["Hydrochloric acid","Sulphuric acid","Nitric acid","Acetic acid"],1),
+  makeQ('ss4',"Speed of light?",["3×10⁶ m/s","3×10⁸ m/s","3×10¹⁰ m/s","3×10¹² m/s"],1),
+  makeQ('ss5',"Newton's 1st law?",["F=ma","Inertia","Gravity","Friction"],1),
+  makeQ('ss6',"Photosynthesis produces?",["CO₂ & H₂","O₂ & glucose","N₂ & water","H₂ & energy"],1),
+  makeQ('ss7',"Symbol for Gold?",["Go","Gd","Au","Ag"],2),
+  makeQ('ss8',"Atomic number of Hydrogen?",["0","1","2","3"],1),
+  makeQ('ss9',"What is the nucleus of an atom made of?",["Electrons","Protons & neutrons","Quarks only","Photons"],1),
+  makeQ('ss10',"DNA is found in the?",["Mitochondria","Cell membrane","Nucleus","Ribosome"],2),
+  makeQ('ss11',"Which wave type cannot travel in a vacuum?",["Light","Radio","Sound","X-ray"],2),
+  makeQ('ss12',"The SI unit of force is?",["Joule","Watt","Newton","Pascal"],2),
+],
+English:[
+  makeQ('se1',"Syllables in 'education'?",["3","4","5","6"],1),
+  makeQ('se2',"A metaphor is?",["Compare using like/as","Implied comparison","Repetition","Rhyme"],1),
+  makeQ('se3',"Romeo & Juliet by?",["Dickens","Austen","Shakespeare","Chaucer"],2),
+  makeQ('se4',"An oxymoron is?",["Contradiction in phrase","Repetition","Comparison","Exaggeration"],0),
+  makeQ('se5',"Alliteration uses?",["Same vowels","Same start consonants","End rhyme","Rhythm"],1),
+  makeQ('se6',"A simile uses?",["Metaphor","'like' or 'as'","Repetition","Alliteration"],1),
+  makeQ('se7',"What is a protagonist?",["The villain","The main character","The narrator","A minor character"],1),
+  makeQ('se8',"Onomatopoeia means?",["A word describing sound","A type of rhyme","Repetition of vowels","A figure of speech"],0),
+  makeQ('se9',"A sonnet has how many lines?",["8","10","14","16"],2),
+  makeQ('se10',"What is hyperbole?",["Understatement","Exaggeration for effect","A comparison","Irony"],1),
+  makeQ('se11',"'Animal Farm' was written by?",["Dickens","Orwell","Hardy","Twain"],1),
+  makeQ('se12',"The setting of a story is?",["The main character","Where/when it happens","The plot twist","The theme"],1),
+],
+Geography:[
+  makeQ('sg1',"Largest ocean?",["Atlantic","Indian","Arctic","Pacific"],3),
+  makeQ('sg2',"Tropic of Capricorn is a?",["Longitude line","Latitude line","Mountain range","Ocean current"],1),
+  makeQ('sg3',"A cold front brings?",["Warm stable air","Cold replacing warm","Trade wind","Drought"],1),
+  makeQ('sg4',"SA west coast climate?",["Tropical","Mediterranean","Savanna","Desert"],1),
+  makeQ('sg5',"GNP stands for?",["Gross National Product","General Net Price","Global Nation Plan","Gross Net Profit"],0),
+  makeQ('sg6',"Biome covering most SA?",["Forest","Savanna/bushveld","Desert","Fynbos"],1),
+  makeQ('sg7',"What is an escarpment?",["A river delta","A steep cliff/slope","A desert plain","A coastal reef"],1),
+  makeQ('sg8',"The Benguela current is?",["Warm","Cold","Neutral","Seasonal"],1),
+  makeQ('sg9',"What is a watershed?",["Flooded land","Divide between river basins","Reservoir","Dam"],1),
+  makeQ('sg10',"GDP stands for?",["Gross Domestic Product","General Daily Production","Global Development Plan","Government Debt Position"],0),
+  makeQ('sg11',"Where does a delta form?",["Mountain peak","Where river meets sea","Desert edge","Plateau"],1),
+  makeQ('sg12',"SA's largest biome?",["Fynbos","Grassland","Savanna","Desert"],2),
+],
+Arts:[
+  makeQ('sa1',"Picasso pioneered?",["Impressionism","Cubism","Surrealism","Realism"],1),
+  makeQ('sa2',"Notes in musical octave?",["7","8","12","16"],1),
+  makeQ('sa3',"Mona Lisa painted by?",["Michelangelo","Raphael","Da Vinci","Botticelli"],2),
+  makeQ('sa4',"Chiaroscuro is?",["A dance","Light/dark contrast","Colour technique","Sculpture"],1),
+  makeQ('sa5',"Impressionism began in?",["Italy","Germany","France","Spain"],2),
+  makeQ('sa6',"A scale has ___ notes?",["5","6","7","8"],2),
+  makeQ('sa7',"'Starry Night' was painted by?",["Monet","Van Gogh","Picasso","Dali"],1),
+  makeQ('sa8',"A treble clef is used for?",["Low notes","High notes","Percussion","Bass notes"],1),
+  makeQ('sa9',"What is sforzando in music?",["Gradually louder","Suddenly loud/accented","Gradually softer","Held note"],1),
+  makeQ('sa10',"Baroque music period was?",["1400–1500","1600–1750","1800–1900","1900–2000"],1),
+  makeQ('sa11',"What is contrapuntal music?",["One melody","Two independent melodies","Drum-only","A cappella"],1),
+  makeQ('sa12',"Michelangelo painted the?",["Mona Lisa","Sistine Chapel ceiling","The Last Supper","Starry Night"],1),
+],
+History:[
+  makeQ('sh1',"WWII ended in?",["1943","1944","1945","1946"],2),
+  makeQ('sh2',"Freedom Charter signed?",["1953","1955","1957","1960"],1),
+  makeQ('sh3',"Sharpeville 1960 was?",["A march","Pass law protest","School strike","Anti-war"],1),
+  makeQ('sh4',"Berlin Wall fell in?",["1987","1988","1989","1990"],2),
+  makeQ('sh5',"Cold War: USA vs?",["UK","China","USSR","Germany"],2),
+  makeQ('sh6',"Robben Island held?",["Navy base","Political prisoners","Treasure","Wildlife"],1),
+  makeQ('sh7',"WWI started in?",["1912","1914","1916","1918"],1),
+  makeQ('sh8',"Who led Nazi Germany?",["Mussolini","Stalin","Hitler","Churchill"],2),
+  makeQ('sh9',"Apartheid laws passed in?",["1944","1948","1952","1956"],1),
+  makeQ('sh10',"Nelson Mandela's prison number?",["444/44","466/64","488/84","420/60"],1),
+  makeQ('sh11',"The Defiance Campaign was in?",["1948","1950","1952","1955"],2),
+  makeQ('sh12',"Jan van Riebeeck arrived at the Cape in?",["1642","1652","1662","1672"],1),
+],
+},
+fet:{
+Maths:[
+  makeQ('ftm1',"Derivative of x²?",["x","2x","x²","2x²"],1),
+  makeQ('ftm2',"sin 30° = ?",["√3/2","½","√2/2","1"],1),
+  makeQ('ftm3',"log₁₀(1000) = ?",["2","3","4","10"],1),
+  makeQ('ftm4',"x²−5x+6=0 → x=?",["1 or 6","2 or 3","1 or −6","3 or −2"],1),
+  makeQ('ftm5',"∫2x dx = ?",["2x²","x²+C","2x²+C","x+C"],1),
+  makeQ('ftm6',"cos 60° = ?",["√3/2","½","√2/2","1"],1),
+  makeQ('ftm7',"tan 45° = ?",["0","½","1","√3"],2),
+  makeQ('ftm8',"Derivative of sin x?",["−cos x","cos x","−sin x","tan x"],1),
+  makeQ('ftm9',"∫cos x dx = ?",["sin x + C","−sin x + C","cos x + C","tan x + C"],0),
+  makeQ('ftm10',"In arithmetic sequence 2,5,8,11,… d=?",["1","2","3","4"],2),
+  makeQ('ftm11',"sin²θ + cos²θ = ?",["0","½","1","2"],2),
+  makeQ('ftm12',"If f(x) = 3x², then f'(x) = ?",["3x","6x","6x²","3"],1),
+],
+Science:[
+  makeQ('fts1',"pH of pure water?",["5","6","7","8"],2),
+  makeQ('fts2',"Newton's 2nd law?",["F=mv","F=ma","p=mv","W=Fd"],1),
+  makeQ('fts3',"Particle with no charge?",["Proton","Electron","Neutron","Photon"],2),
+  makeQ('fts4',"DNA stands for?",["Deoxyribonucleic Acid","Dynamic Nucleic Acid","Double Nucleotide Acid","Diribose Nucleic Acid"],0),
+  makeQ('fts5',"Ohm's Law?",["P=IV","V=IR","F=ma","E=mc²"],1),
+  makeQ('fts6',"Half-life refers to?",["Cell division","Radioactive decay time","Protein synthesis","Osmosis"],1),
+  makeQ('fts7',"Avogadro's number ≈ ?",["6.02×10²³","3.14×10²³","9.8×10²³","1.67×10²⁴"],0),
+  makeQ('fts8',"E = mc² was proposed by?",["Newton","Bohr","Einstein","Faraday"],2),
+  makeQ('fts9',"The SI unit of electric charge is?",["Volt","Ohm","Coulomb","Ampere"],2),
+  makeQ('fts10',"Meiosis produces how many cells?",["1","2","4","8"],2),
+  makeQ('fts11',"What is the unit of frequency?",["Watt","Hertz","Newton","Joule"],1),
+  makeQ('fts12',"Charles' Law relates to?",["Pressure & volume","Volume & temperature","Pressure & temperature","Mass & volume"],1),
+],
+English:[
+  makeQ('fte1',"Dramatic irony: audience knows?",["What character doesn't","Situational surprise","Verbal contradiction","Cosmic unfairness"],0),
+  makeQ('fte2',"Enjambment is?",["End rhyme","Line without pause break","Stanza break","Refrain"],1),
+  makeQ('fte3',"'1984' by Orwell is?",["Romance","Fantasy","Dystopian fiction","Historical fiction"],2),
+  makeQ('fte4',"A soliloquy is?",["Group dialogue","Speaking alone on stage","Narrator's words","Aside"],1),
+  makeQ('fte5',"Free verse is?",["Strict rhyme","Without fixed rhyme/meter","Blank verse","Sonnet"],1),
+  makeQ('fte6',"'Things Fall Apart' by?",["Ngugi wa Thiong'o","Chinua Achebe","Wole Soyinka","Ben Okri"],1),
+  makeQ('fte7',"The 'unreliable narrator' is?",["Always truthful","Cannot be fully trusted","Omniscient","Third person"],1),
+  makeQ('fte8',"What is a Bildungsroman?",["A detective story","A coming-of-age novel","A war story","A love story"],1),
+  makeQ('fte9',"Catharsis in drama means?",["Comic relief","Emotional release","Tragic flaw","Plot twist"],1),
+  makeQ('fte10',"Stream of consciousness is a?",["Narrative technique","Poetic form","Stage direction","Plot device"],0),
+  makeQ('fte11',"Hamartia refers to a character's?",["Fatal flaw","Greatest strength","Hidden identity","Comic trait"],0),
+  makeQ('fte12',"Postcolonial literature deals with?",["Space exploration","Effects of colonialism","Industrial revolution","Ancient mythology"],1),
+],
+Geography:[
+  makeQ('ftg1',"Gini coefficient measures?",["GDP","Income inequality","Inflation","Population growth"],1),
+  makeQ('ftg2',"Continental drift is?",["Ocean current","Tectonic plate movement","Wind pattern","River erosion"],1),
+  makeQ('ftg3',"Urbanisation is?",["Rural growth","City population growth","Forest expansion","Industrial decline"],1),
+  makeQ('ftg4',"SA's dominant sector?",["Agriculture","Manufacturing","Services","Mining"],2),
+  makeQ('ftg5',"Population pyramid shows?",["Age/sex distribution","Income chart","City map","GDP chart"],0),
+  makeQ('ftg6',"HDI stands for?",["Human Development Index","Household Distribution Income","Human Debt Index","High Demand Indicator"],0),
+  makeQ('ftg7',"What causes El Niño?",["Volcanic eruption","Warm Pacific current shift","Atlantic storm system","Arctic melt"],1),
+  makeQ('ftg8',"The term 'megacity' means?",["Capital city","City with 10M+ people","Industrial hub","Military city"],1),
+  makeQ('ftg9',"Carbon footprint measures?",["Forest size","CO₂ emissions from activity","Water usage","Land area"],1),
+  makeQ('ftg10',"Push factors in migration are?",["Better jobs at destination","Political violence at origin","Good climate at destination","Cultural attraction"],1),
+  makeQ('ftg11',"What is demography?",["Study of rocks","Study of population","Study of weather","Study of economies"],1),
+  makeQ('ftg12',"Formal economic sector means?",["Illegal trade","Unregistered work","Registered/taxed employment","Barter system"],2),
+],
+Arts:[
+  makeQ('fta1',"Golden ratio ≈ ?",["1.414","1.618","2.718","3.14"],1),
+  makeQ('fta2',"'Four Seasons' composed by?",["Bach","Mozart","Vivaldi","Beethoven"],2),
+  makeQ('fta3',"Chroma = ?",["Lightness","Colour purity/saturation","Hue","Shadow"],1),
+  makeQ('fta4',"Pointillism is?",["Abstract smearing","Painting with tiny dots","Line art","Watercolour wash"],1),
+  makeQ('fta5',"'Rite of Spring' by?",["Debussy","Ravel","Stravinsky","Prokofiev"],2),
+  makeQ('fta6',"Tenebrism involves extreme?",["Colourism","Chiaroscuro","Impressionism","Abstraction"],1),
+  makeQ('fta7',"The Bauhaus school began in?",["France","Italy","Germany","Russia"],2),
+  makeQ('fta8',"Who designed the Guggenheim Museum NY?",["Mies van der Rohe","Le Corbusier","Frank Lloyd Wright","Zaha Hadid"],2),
+  makeQ('fta9',"Atonality in music means?",["No fixed key","Very loud","Very soft","Slow tempo"],0),
+  makeQ('fta10',"What is a fugue?",["A sad song","Contrapuntal composition","A folk dance","An opera"],1),
+  makeQ('fta11',"Minimalism in art is characterized by?",["Complex detail","Extreme simplicity","Bright colour","Surreal imagery"],1),
+  makeQ('fta12',"Who composed '9th Symphony'?",["Mozart","Bach","Beethoven","Handel"],2),
+],
+History:[
+  makeQ('fth1',"SA Constitution adopted?",["1993","1994","1996","1998"],2),
+  makeQ('fth2',"Cold War: USA vs?",["UK","USSR","China","Germany"],1),
+  makeQ('fth3',"Soweto Uprising year?",["1974","1976","1978","1980"],1),
+  makeQ('fth4',"TRC chaired by?",["Mandela","Tutu","Mbeki","Ramaphosa"],1),
+  makeQ('fth5',"CODESA was?",["A party","Negotiations for democracy","Apartheid law","Trade union"],1),
+  makeQ('fth6',"Freedom Charter signed?",["1953","1955","1957","1960"],1),
+  makeQ('fth7',"The Nuremberg Trials prosecuted?",["WWI leaders","Nazi war criminals","Soviet spies","Colonial leaders"],1),
+  makeQ('fth8',"The Universal Declaration of Human Rights was adopted in?",["1945","1948","1950","1952"],1),
+  makeQ('fth9',"The Cuban Missile Crisis was in?",["1959","1961","1962","1965"],2),
+  makeQ('fth10',"Martin Luther King Jr. was assassinated in?",["1965","1966","1968","1970"],2),
+  makeQ('fth11',"The Berlin Wall was built in?",["1958","1959","1961","1963"],2),
+  makeQ('fth12',"The Rwandan Genocide took place in?",["1990","1992","1994","1996"],2),
+],
+},
+};
+
+/* ══════════════════════════ LEVEL DEFINITIONS ══════════════════════════ */
+const LDEFS=[
+  {n:1,game:"match",type:"classic",G:6,goal:8,moves:24,name:"First Match",subj:"Maths",accent:"#6d28d9",icon:"🎯"},
+  {n:2,game:"match",type:"classic",G:6,goal:8,moves:24,name:"Nature Watch",subj:"Science",accent:"#059669",icon:"🔬"},
+  {n:3,game:"match",type:"classic",G:6,goal:9,moves:22,name:"Word World",subj:"English",accent:"#b45309",icon:"📖"},
+  {n:4,game:"bubble",type:"sprint",G:6,goal:8,moves:14,name:"Quick Fire!",subj:"Maths",accent:"#dc2626",icon:"⚡"},
+  {n:5,game:"match",type:"classic",G:7,goal:10,moves:22,name:"Map Quest",subj:"Geography",accent:"#0891b2",icon:"🌍"},
+  {n:6,game:"match",type:"classic",G:7,goal:10,moves:22,name:"Art Attack",subj:"Arts",accent:"#db2777",icon:"🎨"},
+  {n:7,game:"match",type:"classic",G:7,goal:10,moves:20,name:"History Hunt",subj:"History",accent:"#7c3aed",icon:"🏛️"},
+  {n:8,game:"match",type:"giant",G:8,goal:14,moves:26,name:"Big Board!",subj:"Science",accent:"#059669",icon:"🌍"},
+  {n:9,game:"bubble",type:"sprint",G:7,goal:10,moves:15,name:"Speed Run!",subj:"English",accent:"#dc2626",icon:"⚡"},
+  {n:10,game:"match",type:"classic",G:7,goal:12,moves:20,name:"Scholar",subj:"Maths",accent:"#6d28d9",icon:"🧠"},
+  {n:11,game:"bubble",type:"sprint",G:7,goal:10,moves:14,name:"Lightning!",subj:"Geography",accent:"#dc2626",icon:"⚡"},
+  {n:12,game:"match",type:"giant",G:8,goal:16,moves:26,name:"Mega Match",subj:"History",accent:"#7c3aed",icon:"🌍"},
+  {n:13,game:"match",type:"classic",G:7,goal:12,moves:18,name:"Brain Buster",subj:"Science",accent:"#059669",icon:"🔬"},
+  {n:14,game:"bubble",type:"sprint",G:8,goal:12,moves:16,name:"Blitz!",subj:"Arts",accent:"#dc2626",icon:"⚡"},
+  {n:15,game:"match",type:"giant",G:8,goal:18,moves:24,name:"Grand Slam",subj:"Maths",accent:"#6d28d9",icon:"🌍"},
+  {n:16,game:"match",type:"classic",G:7,goal:14,moves:18,name:"Expert Mode",subj:"English",accent:"#b45309",icon:"🧠"},
+  {n:17,game:"bubble",type:"sprint",G:8,goal:14,moves:15,name:"Supersonic!",subj:"Science",accent:"#dc2626",icon:"⚡"},
+  {n:18,game:"match",type:"giant",G:8,goal:20,moves:24,name:"Epic Board",subj:"Geography",accent:"#0891b2",icon:"🌍"},
+  {n:19,game:"match",type:"classic",G:8,goal:16,moves:18,name:"Champion",subj:"History",accent:"#7c3aed",icon:"🏆"},
+  {n:20,game:"bubble",type:"sprint",G:8,goal:16,moves:14,name:"Final Sprint!",subj:"Maths",accent:"#dc2626",icon:"⚡"},
+  {n:21,game:"match",type:"giant",G:8,goal:22,moves:24,name:"Titan Board",subj:"Arts",accent:"#db2777",icon:"🌍"},
+  {n:22,game:"bubble",type:"sprint",G:7,goal:16,moves:14,name:"Thunderbolt!",subj:"English",accent:"#dc2626",icon:"⚡"},
+  {n:23,game:"match",type:"classic",G:8,goal:18,moves:18,name:"Elite Scholar",subj:"Science",accent:"#059669",icon:"🧠"},
+  {n:24,game:"match",type:"giant",G:8,goal:24,moves:22,name:"Legendary",subj:"History",accent:"#7c3aed",icon:"🏆"},
+  {n:25,game:"bubble",type:"sprint",G:8,goal:20,moves:14,name:"Godspeed!",subj:"Maths",accent:"#FFD700",icon:"⚡"},
+];
+function getLDef(n){if(n<=25)return LDEFS[n-1];const b=LDEFS[(n-1)%25],e=Math.floor((n-1)/25);return{...b,n,goal:b.goal+e*3,moves:Math.max(12,b.moves-e*2),name:b.name+"+"};}
+
+/* ══════════════════════════ QUESTION HELPERS ══════════════════════════ */
+function shuffleArr(a){const r=[...a];for(let i=r.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[r[i],r[j]]=[r[j],r[i]];}return r;}
+function shuffleQ(q){const idxs=shuffleArr([0,1,2,3]),newOpts=idxs.map(i=>q.opts[i]),newA=idxs.indexOf(q.a);return{...q,opts:newOpts,a:newA};}
+
+function pickQ(gk,subj,usedIds){
+  const pool=(subj&&QBANK[gk]?.[subj])||Object.values(QBANK[gk]||{}).flat();
+  const avail=pool.filter(q=>!usedIds.includes(q.id));
+  const src=avail.length>0?avail:pool;
+  const q=src[Math.floor(Math.random()*src.length)];
+  return shuffleQ(q);
+}
+
+/* ══════════════════════════ BOARD UTILS ══════════════════════════ */
+const rnd=()=>Math.floor(Math.random()*4);
+const mk=t=>({type:t,id:uid()});
+function makeBoard(G){const b=[];for(let r=0;r<G;r++){b.push([]);for(let c=0;c<G;c++){let t;do{t=rnd();}while((c>=2&&b[r][c-2].type===t&&b[r][c-1].type===t)||(r>=2&&b[r-2][c].type===t&&b[r-1][c].type===t));b[r].push(mk(t));}}return b;}
+function findM(board,G){const m=new Set();for(let r=0;r<G;r++){let c=0;while(c<G){const t=board[r][c].type;let e=c+1;while(e<G&&board[r][e].type===t)e++;if(e-c>=3)for(let i=c;i<e;i++)m.add(`${r},${i}`);c=e;}}for(let c=0;c<G;c++){let r=0;while(r<G){const t=board[r][c].type;let e=r+1;while(e<G&&board[e][c].type===t)e++;if(e-r>=3)for(let i=r;i<e;i++)m.add(`${i},${c}`);r=e;}}return m;}
+function dropFill(board,matches,G){const nb=board.map(row=>row.map(c=>({...c})));matches.forEach(k=>{const[r,c]=k.split(",").map(Number);nb[r][c]=null;});for(let c=0;c<G;c++){let bot=G-1;for(let r=G-1;r>=0;r--){if(nb[r][c]){nb[bot][c]=nb[r][c];if(bot!==r)nb[r][c]=null;bot--;}}for(let r=bot;r>=0;r--)nb[r][c]=mk(rnd());}return nb;}
+function swapC(board,a,b){const nb=board.map(r=>[...r]);[nb[a.r][a.c],nb[b.r][b.c]]=[nb[b.r][b.c],nb[a.r][a.c]];return nb;}
+
+/* ══════════════════════════ STORAGE ══════════════════════════ */
+async function loadSave(){try{const r=localStorage.getItem("akili-v8");return r?JSON.parse(r):null;}catch{return null;}}
+async function doSave(d){try{localStorage.setItem("akili-v8",JSON.stringify(d));}catch{}}
+
+/* ══════════════════════════ CSS ══════════════════════════ */
+const CSS=`
+@keyframes slideUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}
+@keyframes popIn{0%{transform:scale(.3);opacity:0}70%{transform:scale(1.15)}100%{transform:scale(1);opacity:1}}
+@keyframes starPop{0%{transform:scale(0) rotate(-20deg);opacity:0}60%{transform:scale(1.3) rotate(8deg)}100%{transform:scale(1) rotate(0);opacity:1}}
+@keyframes glow{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.5;transform:scale(.88)}}
+@keyframes shake{0%,100%{transform:translateX(0)}20%{transform:translateX(-8px)}40%{transform:translateX(8px)}60%{transform:translateX(-4px)}80%{transform:translateX(4px)}}
+@keyframes floatUp{0%{opacity:1;transform:translateY(0)}100%{opacity:0;transform:translateY(-55px)}}
+@keyframes cfF{0%{transform:translateY(-10px) rotate(0deg);opacity:1}100%{transform:translateY(260px) rotate(560deg);opacity:0}}
+@keyframes studyIn{0%{transform:scale(.85);opacity:0}100%{transform:scale(1);opacity:1}}
+@keyframes breathe{0%,100%{transform:scale(1)}50%{transform:scale(1.05)}}
+@keyframes sprintPulse{0%,100%{opacity:1}50%{opacity:.4}}
+@keyframes bounce{0%,100%{transform:translateY(0)}50%{transform:translateY(-12px)}}
+@keyframes wiggle{0%,100%{transform:rotate(0)}25%{transform:rotate(-10deg)}75%{transform:rotate(10deg)}}
+@keyframes bubbleFloat{0%{transform:translate(0,0)}25%{transform:translate(8px,-6px)}50%{transform:translate(-5px,-12px)}75%{transform:translate(6px,-8px)}100%{transform:translate(0,0)}}
+@keyframes bubblePop{0%{transform:scale(1);opacity:1}100%{transform:scale(2.5);opacity:0}}
+@keyframes speechIn{0%{opacity:0;transform:scale(.8) translateY(4px)}100%{opacity:1;transform:scale(1) translateY(0)}}
+@keyframes speechOut{0%{opacity:1}100%{opacity:0}}
+.tile{cursor:pointer;user-select:none;transition:transform .12s,box-shadow .15s,opacity .15s;}
+.tile:active{transform:scale(.8)!important;}
+.t-sel{transform:scale(1.12)!important;z-index:3;}
+.t-glow{animation:glow .38s ease infinite;}
+.t-shake{animation:shake .42s ease;}
+.bubble-item{cursor:pointer;position:absolute;display:flex;flex-direction:column;align-items:center;justify-content:center;border-radius:50%;transition:transform .1s;user-select:none;}
+.bubble-item:active{transform:scale(.88)!important;}
+button{font-family:'Nunito',sans-serif;cursor:pointer;border:none;outline:none;}
+button:active{transform:scale(.95);}
+`;
+
+/* ══════════════════════════ AKILI CHARACTER ══════════════════════════ */
+const CHAR_MOODS={idle:"🦁",happy:"😄",excited:"🤩",sad:"😢",wow:"😮",win:"🏆",fire:"🔥",think:"🤔",cheer:"🎉"};
+const CHAR_MSGS={idle:["Let's learn!","You got this!","Ready to match?","Go Akili!"],happy:["Correct! ✓","Nice one!","That's right!","Well done!"],excited:["COMBO! 🔥","On fire!","Amazing!","Keep going!"],sad:["Try again!","Don't give up!","Study time...","Almost there!"],wow:["Whooa!","Big combo!","Incredible!","Unbelievable!"],win:["You won! 🎉","Brilliant!","Level clear!","Champion!"],fire:["🔥 HOT! 🔥","Blazing!","Unstoppable!"],think:["Hmm...","Choose wisely","Think...","You know this!"],cheer:["Let's go!","You can do it!","Believe!","Push on!"]};
+
+function AkiliChar({mood,msg}){
+  const face=CHAR_MOODS[mood]||CHAR_MOODS.idle;
+  const anim=mood==='excited'||mood==='win'?"bounce .5s ease infinite":mood==='sad'?"wiggle .5s ease":"breathe 3s ease infinite";
+  return(
+    <div style={{position:"fixed",bottom:80,right:12,zIndex:60,textAlign:"center",pointerEvents:"none"}}>
+      {msg&&(
+        <div style={{background:"#fff",color:"#1a1a2e",borderRadius:14,padding:"7px 12px",fontSize:12,fontWeight:900,marginBottom:6,maxWidth:130,lineHeight:1.3,boxShadow:"0 4px 16px #0005",animation:"speechIn .3s ease, speechOut .3s ease 2.7s forwards",position:"relative"}}>
+          {msg}
+          <div style={{position:"absolute",bottom:-7,right:18,width:0,height:0,borderLeft:"7px solid transparent",borderRight:"7px solid transparent",borderTop:"7px solid #fff"}}/>
+        </div>
+      )}
+      <div style={{fontSize:42,animation:anim,display:"inline-block",filter:"drop-shadow(0 4px 8px #00000040)"}}>{face}</div>
+    </div>
+  );
+}
+
+/* ══════════════════════════ BUBBLE POP GAME ══════════════════════════ */
+function BubblePop({q,correctType,goal,collected,onCollect,onWrongTap,icons,accent}){
+  const areaRef=useRef(null);
+  const [dim,setDim]=useState({w:320,h:260});
+  const [pos,setPos]=useState(null);
+  const [poppingType,setPoppingType]=useState(null);
+  const [wrongType,setWrongType]=useState(null);
+  const BSIZE=88;
+
+  // Measure the arena once mounted
+  useEffect(()=>{
+    const measure=()=>{
+      if(areaRef.current){
+        const r=areaRef.current.getBoundingClientRect();
+        if(r.width>50)setDim({w:Math.floor(r.width),h:Math.floor(r.height)});
+      }
+    };
+    measure();
+    const t=setTimeout(measure,120);
+    return()=>clearTimeout(t);
+  },[]);
+
+  // Place 4 bubbles (one per answer) when dimensions known
+  useEffect(()=>{
+    const{w,h}=dim,mx=Math.max(0,w-BSIZE),my=Math.max(0,h-BSIZE);
+    const speed=()=>(Math.random()<0.5?1:-1)*(1.2+Math.random()*1.2);
+    setPos([
+      {x:Math.min(w*0.05,mx),  y:Math.min(h*0.07,my),  vx:speed(),vy:speed()},
+      {x:Math.min(w*0.52,mx),  y:Math.min(h*0.07,my),  vx:speed(),vy:speed()},
+      {x:Math.min(w*0.05,mx),  y:Math.min(h*0.54,my),  vx:speed(),vy:speed()},
+      {x:Math.min(w*0.52,mx),  y:Math.min(h*0.54,my),  vx:speed(),vy:speed()},
+    ]);
+  },[dim]);
+
+  // JS physics loop — updates left/top so tap target matches visual
+  useEffect(()=>{
+    if(!pos)return;
+    const{w,h}=dim,mx=Math.max(0,w-BSIZE),my=Math.max(0,h-BSIZE);
+    const timer=setInterval(()=>{
+      setPos(p=>p.map(b=>{
+        let{x,y,vx,vy}=b;
+        x+=vx;y+=vy;
+        if(x<=0){vx=Math.abs(vx);x=0;}else if(x>=mx){vx=-Math.abs(vx);x=mx;}
+        if(y<=0){vy=Math.abs(vy);y=0;}else if(y>=my){vy=-Math.abs(vy);y=my;}
+        return{x,y,vx,vy};
+      }));
+    },50);
+    return()=>clearInterval(timer);
+  },[!!pos,dim]);
+
+  function tapBubble(type){
+    if(poppingType!==null||wrongType!==null)return;
+    SFX.pop();
+    if(type===correctType){
+      setPoppingType(type);
+      onCollect();
+      setTimeout(()=>{
+        const{w,h}=dim,mx=Math.max(0,w-BSIZE),my=Math.max(0,h-BSIZE);
+        const speed=()=>(Math.random()<0.5?1:-1)*(1.2+Math.random()*1.2);
+        setPos(p=>p.map((b,i)=>i===type?{x:Math.random()*mx,y:Math.random()*my,vx:speed(),vy:speed()}:b));
+        setPoppingType(null);
+      },450);
+    }else{
+      setWrongType(type);
+      onWrongTap();
+      setTimeout(()=>setWrongType(null),500);
+    }
+  }
+
+  const prog=Math.min(1,collected/goal);
+  const ct=TC[correctType];
+
+  return(
+    <div style={{flex:1,minHeight:0,display:"flex",flexDirection:"column",gap:5}}>
+      {/* Goal bar */}
+      <div style={{background:`${ct.bg}22`,borderRadius:13,padding:"9px 14px",flexShrink:0,border:`2px solid ${ct.bg}55`,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+        <div style={{display:"flex",alignItems:"center",gap:9}}>
+          <span style={{color:"#e2e8f0",fontSize:15,fontWeight:800}}>Pop the</span>
+          <div style={{width:38,height:38,borderRadius:"50%",background:`radial-gradient(circle at 35% 30%,${ct.sh},${ct.bg})`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,boxShadow:`0 0 14px ${ct.bg}`}}>{icons[correctType]}</div>
+          <span style={{color:"#e2e8f0",fontSize:15,fontWeight:800}}>bubbles!</span>
+        </div>
+        <span style={{color:ct.sh,fontWeight:900,fontSize:19}}>{collected}/{goal}</span>
+      </div>
+      <div style={{background:"#ffffff14",borderRadius:999,height:10,overflow:"hidden",flexShrink:0}}>
+        <div style={{width:`${prog*100}%`,height:"100%",borderRadius:999,background:`linear-gradient(90deg,${ct.bg},${ct.sh})`,transition:"width .4s ease"}}/>
+      </div>
+
+      {/* Bubble arena — click targets match visual because we use left/top not transform */}
+      <div ref={areaRef} style={{flex:1,minHeight:180,position:"relative",background:"#ffffff05",borderRadius:16,overflow:"hidden",border:`2px solid ${ct.bg}22`}}>
+        <div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",pointerEvents:"none"}}>
+          <span style={{fontSize:90,opacity:0.05}}>{icons[correctType]}</span>
+        </div>
+
+        {pos&&[0,1,2,3].map(type=>{
+          const t=TC[type];
+          const isCor=type===correctType;
+          const isPopping=poppingType===type;
+          const isWrong=wrongType===type;
+          const b=pos[type];
+          const raw=q.opts[type]||"";
+          const display=raw.length>12?raw.slice(0,11)+"…":raw;
+          return(
+            <div key={type}
+              onClick={()=>tapBubble(type)}
+              style={{
+                position:"absolute",
+                left:b.x,
+                top:b.y,
+                width:BSIZE,
+                height:BSIZE,
+                borderRadius:"50%",
+                background:`radial-gradient(circle at 32% 28%,${t.sh},${t.bg})`,
+                border:isCor?"3px solid rgba(255,255,255,0.92)":`2px solid ${t.sh}55`,
+                boxShadow:isCor?`0 0 22px ${t.bg}cc,0 0 44px ${t.bg}55,0 6px 14px ${t.bg}88`:`0 4px 12px ${t.bg}44`,
+                display:"flex",
+                flexDirection:"column",
+                alignItems:"center",
+                justifyContent:"center",
+                cursor:"pointer",
+                zIndex:isCor?5:3,
+                opacity:isPopping?0:1,
+                animation:isPopping?"bubbleCorrectPop .45s ease forwards":isWrong?"bubbleWrongShake .5s ease":isCor?"correctGlowAnim 2s ease infinite":"none",
+                padding:7,
+                gap:3,
+                userSelect:"none",
+                WebkitUserSelect:"none",
+                touchAction:"manipulation",
+              }}>
+              <span style={{fontSize:28,lineHeight:1}}>{icons[type]}</span>
+              <span style={{fontSize:12,fontWeight:900,color:"#fff",textAlign:"center",lineHeight:1.2,textShadow:"0 1px 4px rgba(0,0,0,0.75)",maxWidth:BSIZE-14,overflow:"hidden"}}>{display}</span>
+              {isCor&&<span style={{fontSize:10,color:"rgba(255,255,255,0.9)",fontWeight:900}}>TAP ✓</span>}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Answer key legend */}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:5,flexShrink:0,pointerEvents:"none"}}>
+        {TC.map((t,i)=>(
+          <div key={i} style={{display:"flex",alignItems:"center",gap:6,background:i===correctType?`${t.bg}28`:"#ffffff08",borderRadius:10,padding:"6px 10px",border:i===correctType?`2px solid ${t.bg}88`:"2px solid transparent"}}>
+            <span style={{fontSize:16,flexShrink:0}}>{icons[i]}</span>
+            <span style={{color:i===correctType?t.sh:"#475569",fontWeight:i===correctType?900:700,fontSize:13,overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis",flex:1}}>{q.opts[i]}{i===correctType&&" ✓"}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ══════════════════════════ LEVEL MAP ══════════════════════════ */
+function LevelMap({stars,level,totalLevels,onSelect,onClose,packs,gradeKey,onBuyPack}){
+  return(
+    <div style={{position:"fixed",inset:0,background:"#000000dd",display:"flex",alignItems:"flex-end",justifyContent:"center",zIndex:400}} onClick={onClose}>
+      <div style={{background:"linear-gradient(145deg,#1e1b4b,#150f3d)",borderRadius:"24px 24px 0 0",padding:"20px 16px 28px",width:"100%",maxWidth:480,maxHeight:"85vh",overflow:"auto",animation:"slideUp .35s ease"}} onClick={e=>e.stopPropagation()}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+          <h3 style={{color:"#fff",fontWeight:900,fontSize:18}}>🗺️ Level Map</h3>
+          <button onClick={onClose} style={{background:"#ffffff18",borderRadius:10,padding:"6px 14px",color:"#fff",fontWeight:800,fontSize:13}}>✕ Close</button>
+        </div>
+        <div style={{background:"#ffffff14",borderRadius:999,height:10,overflow:"hidden",marginBottom:4}}>
+          <div style={{width:`${Math.min(100,(level-1)/totalLevels*100)}%`,height:"100%",background:"linear-gradient(90deg,#6d28d9,#FFD700)",borderRadius:999}}/>
+        </div>
+        <p style={{color:"#64748b",fontSize:12,fontWeight:700,marginBottom:14,textAlign:"right"}}>{Math.max(0,level-1)}/{totalLevels} done · {Object.values(stars).reduce((a,b)=>a+b,0)} ⭐ earned</p>
+        {/* Packs */}
+        {Array.from({length:Math.ceil(totalLevels/PACK_SIZE)},(_,pi)=>{
+          const packStart=pi*PACK_SIZE+1,packEnd=Math.min((pi+1)*PACK_SIZE,totalLevels);
+          const isFree=pi===0,bought=pi<=(packs[gradeKey]||0);
+          return(
+            <div key={pi} style={{marginBottom:16}}>
+              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+                <div style={{flex:1,height:1,background:"#ffffff14"}}/>
+                <span style={{color:isFree?"#6ee7b7":bought?"#a78bfa":"#64748b",fontSize:11,fontWeight:900,whiteSpace:"nowrap"}}>
+                  {isFree?"📦 FREE BASE PACK":`📦 PACK ${pi+1} — ${bought?"OWNED":"R10"}`}
+                </span>
+                <div style={{flex:1,height:1,background:"#ffffff14"}}/>
+                {!isFree&&!bought&&<button onClick={()=>onBuyPack(pi)} style={{background:"linear-gradient(135deg,#b45309,#f59e0b)",borderRadius:10,padding:"4px 12px",color:"#fff",fontWeight:900,fontSize:12}}>Buy R10</button>}
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:5}}>
+                {Array.from({length:packEnd-packStart+1},(_,i)=>{
+                  const lvl=packStart+i,s=stars[lvl]||0,done=s>0,cur=lvl===level,locked=!bought||lvl>level;
+                  const def=getLDef(lvl);
+                  return(
+                    <div key={lvl} onClick={()=>{if(!locked&&(done||cur))onSelect(lvl);}}
+                      style={{aspectRatio:"1",borderRadius:12,background:cur?"linear-gradient(135deg,#FFD700,#F59E0B)":done?"linear-gradient(135deg,#4f46e5,#6d28d9)":locked?"#ffffff06":"#ffffff0e",border:cur?"2px solid #fff":done?"2px solid #6d28d9":locked?"2px solid #ffffff08":"2px solid #ffffff18",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",cursor:(done||cur)&&!locked?"pointer":"default",opacity:locked?0.3:1,animation:cur?"breathe 2s ease infinite":"none"}}>
+                      <span style={{fontSize:10,fontWeight:900,color:cur?"#1a1a2e":done?"#fff":"#374151"}}>{lvl}</span>
+                      <span style={{fontSize:9}}>{locked?"🔒":done?(s===3?"⭐":s===2?"✨":"★"):cur?"▶":""}</span>
+                      <span style={{fontSize:7,color:cur?"#1a1a2e":def.game==="bubble"?"#ef4444":"#059669"}}>{def.game==="bubble"?"⚡":"🎯"}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
+        <p style={{color:"#64748b",fontSize:11,fontWeight:700,textAlign:"center",marginTop:8}}>⚡ = Bubble Pop &nbsp;·&nbsp; 🎯 = Tile Match &nbsp;·&nbsp; Tap any unlocked level to play</p>
+      </div>
+    </div>
+  );
+}
+
+/* ══════════════════════════ GRADE SELECT SCREEN ══════════════════════════ */
+function GradeShop({userGrade,unlockedGrades,onUnlock,onClose}){
+  return(
+    <div style={{position:"fixed",inset:0,background:"#000000dd",display:"flex",alignItems:"center",justifyContent:"center",zIndex:400,padding:16}} onClick={onClose}>
+      <div style={{background:"linear-gradient(145deg,#1e1b4b,#150f3d)",borderRadius:24,padding:"22px 18px",maxWidth:400,width:"100%",animation:"studyIn .4s ease"}} onClick={e=>e.stopPropagation()}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+          <h3 style={{color:"#fff",fontWeight:900,fontSize:18}}>🎓 Grade Access</h3>
+          <button onClick={onClose} style={{background:"#ffffff18",borderRadius:10,padding:"6px 14px",color:"#fff",fontWeight:800,fontSize:13}}>✕ Close</button>
+        </div>
+        <p style={{color:"#94a3b8",fontSize:13,fontWeight:700,marginBottom:16}}>Lower grades are free. Higher grades cost R10 to unlock.</p>
+        {GRADES.map(g=>{
+          const isOwn=g.key===userGrade,isUnlocked=unlockedGrades.includes(g.key)||isOwn;
+          const gradeIdx=GRADE_ORDER.indexOf(g.key),userIdx=GRADE_ORDER.indexOf(userGrade);
+          const isHigher=gradeIdx>userIdx,isLower=gradeIdx<userIdx;
+          return(
+            <div key={g.key} style={{background:isOwn?"#6d28d920":isUnlocked?"#05906920":"#ffffff0a",borderRadius:16,padding:"14px 16px",marginBottom:10,border:isOwn?"2px solid #6d28d9":isUnlocked?"2px solid #059669":"2px solid #ffffff18",display:"flex",alignItems:"center",gap:12}}>
+              <span style={{fontSize:26}}>{g.icon}</span>
+              <div style={{flex:1}}>
+                <div style={{color:"#fff",fontWeight:900,fontSize:15}}>{g.label}</div>
+                <div style={{color:"#64748b",fontSize:11,fontWeight:700}}>{g.sub} · 25 levels</div>
+              </div>
+              {isOwn&&<span style={{color:"#6ee7b7",fontWeight:900,fontSize:12}}>YOUR GRADE ✓</span>}
+              {!isOwn&&isLower&&!isUnlocked&&<span style={{color:"#6ee7b7",fontWeight:900,fontSize:12}}>FREE ✓</span>}
+              {!isOwn&&isUnlocked&&<span style={{color:"#a78bfa",fontWeight:900,fontSize:12}}>OWNED ✓</span>}
+              {isHigher&&!isUnlocked&&<button onClick={()=>onUnlock(g.key)} style={{background:"linear-gradient(135deg,#b45309,#f59e0b)",borderRadius:12,padding:"8px 14px",color:"#fff",fontWeight:900,fontSize:13}}>Buy R10</button>}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* ══════════════════════════ BACK BUTTON ══════════════════════════ */
+function BackBtn({onClick,label="🏠 Main Menu"}){
+  return(
+    <button onClick={()=>{SFX.tap();onClick();}} style={{display:"flex",alignItems:"center",gap:6,background:"#ffffff14",border:"1px solid #ffffff22",borderRadius:14,padding:"9px 18px",color:"#fff",fontWeight:900,fontSize:14,marginBottom:16,width:"100%",justifyContent:"center"}}>
+      {label}
+    </button>
+  );
+}
+
+/* ══════════════════════════ MAIN APP ══════════════════════════ */
+function App(){
+  const[phase,setPhase]=useState("loading");
+  const[gradeKey,setGradeKey]=useState(null);
+  const[unlockedGrades,setUnlockedGrades]=useState([]);
+  const[packs,setPacks]=useState({});// {gradeKey: number of extra packs bought}
+  const[activeGrade,setActiveGrade]=useState(null);// which grade is currently being played
+  const[tutStep,setTutStep]=useState(0);
+  const[showTut,setShowTut]=useState(false);
+  const[showMap,setShowMap]=useState(false);
+  const[showGradeShop,setShowGradeShop]=useState(false);
+  const[soundOn,setSoundOn]=useState(true);
+  const[board,setBoard]=useState(()=>makeBoard(6));
+  const[boardG,setBoardG]=useState(6);
+  const[sel,setSel]=useState(null);
+  const[hi,setHi]=useState(new Set());
+  const[q,setQ]=useState(null);
+  const[dQ,setDQ]=useState(null);
+  const[picked,setPicked]=useState(null);
+  const[attempt,setAttempt]=useState(0);
+  const[correctType,setCT]=useState(0);
+  const[collected,setCol]=useState(0);
+  const[goal,setGoal]=useState(8);
+  const[moves,setMoves]=useState(24);
+  const[ldef,setLdef]=useState(null);
+  const[level,setLevel]=useState(1);
+  const[lives,setLives]=useState(5);
+  const[sessions,setSess]=useState(3);
+  const[stars,setStars]=useState({});
+  const[winStars,setWinS]=useState(0);
+  const[isAnim,setIsAnim]=useState(false);
+  const[shakeTile,setShakeTile]=useState(null);
+  const[pops2,setPops2]=useState([]);// score popups
+  const[confetti,setConfetti]=useState([]);
+  const[buyStep,setBuyStep]=useState(0);
+  const[combo,setCombo]=useState(0);
+  const[studyCD,setStudyCD]=useState(5);
+  const[usedQIds,setUsedQIds]=useState([]);// session-level question tracking
+  const[charMood,setCharMood]=useState("idle");
+  const[charMsg,setCharMsg]=useState("");
+  const[charKey,setCharKey]=useState(0);// force re-render for speech
+
+  const livRef=useRef(5),lvlRef=useRef(1),colRef=useRef(0),goalRef=useRef(8),gRef=useRef(6),ctRef=useRef(0),usedRef=useRef([]);
+  useEffect(()=>{livRef.current=lives;},[lives]);
+  useEffect(()=>{lvlRef.current=level;},[level]);
+  useEffect(()=>{colRef.current=collected;},[collected]);
+  useEffect(()=>{goalRef.current=goal;},[goal]);
+  useEffect(()=>{gRef.current=boardG;},[boardG]);
+  useEffect(()=>{ctRef.current=correctType;},[correctType]);
+  useEffect(()=>{usedRef.current=usedQIds;},[usedQIds]);
+  useEffect(()=>{SFX.setMute(!soundOn);},[soundOn]);
+
+  useEffect(()=>{
+    if(phase!=="study")return;
+    if(studyCD<=0){retryQ();return;}
+    const t=setTimeout(()=>setStudyCD(c=>c-1),1000);
+    return()=>clearTimeout(t);
+  },[phase,studyCD]);
+
+  useEffect(()=>{
+    loadSave().then(s=>{
+      if(s){
+        setLevel(s.level??1);setSess(s.sessions??3);setStars(s.stars??{});setLives(s.lives??5);
+        setGradeKey(s.gradeKey??null);setSoundOn(s.soundOn!==false);
+        setUnlockedGrades(s.unlockedGrades??[]);setPacks(s.packs??{});
+        setActiveGrade(s.gradeKey??null);setUsedQIds(s.usedQIds??[]);
+        livRef.current=s.lives??5;lvlRef.current=s.level??1;usedRef.current=s.usedQIds??[];
+      }
+      setPhase(s?.gradeKey?"title":"gradeSelect");
+    });
+  },[]);
+
+  const save=(x={})=>doSave({level,sessions,stars,lives,gradeKey,soundOn,unlockedGrades,packs,usedQIds,...x});
+
+  function setChar(mood,msg){const msgs=CHAR_MSGS[mood]||[];const m=msg||(msgs[Math.floor(Math.random()*msgs.length)]||"");setCharMood(mood);setCharMsg(m);setCharKey(k=>k+1);}
+
+  const addPop=text=>{const id=uid();setPops2(p=>[...p,{id,text}]);setTimeout(()=>setPops2(p=>p.filter(x=>x.id!==id)),900);};
+  const spawnCF=()=>{setConfetti(Array.from({length:28},(_,i)=>({id:i,x:Math.random()*100,delay:Math.random()*.5,dur:.9+Math.random()*.7,color:CC[i%CC.length],round:Math.random()>.4})));setTimeout(()=>setConfetti([]),2400);};
+
+  function goToMenu(){SFX.tap();setPhase("title");}
+
+  function beginLevel(lvl,gk){
+    SFX.levelup();
+    const gKey=gk||activeGrade||gradeKey;
+    const def=getLDef(lvl);
+    // Pick question, avoiding repeats
+    const newQ=pickQ(gKey,def.subj,usedRef.current);
+    const newUsed=[...usedRef.current,newQ.id];
+    // Reset used if we've exhausted the pool for this grade
+    const totalQ=Object.values(QBANK[gKey]||{}).flat().length;
+    const finalUsed=newUsed.length>=totalQ?[newQ.id]:newUsed;
+    setUsedQIds(finalUsed);usedRef.current=finalUsed;
+    lvlRef.current=lvl;gRef.current=def.G;ctRef.current=newQ.a;
+    setLevel(lvl);setLdef(def);setQ(newQ);setDQ(newQ);setAttempt(0);setPicked(null);
+    setBoard(makeBoard(def.G));setBoardG(def.G);setSel(null);setHi(new Set());
+    setMoves(def.moves);setGoal(def.goal);goalRef.current=def.goal;
+    setCol(0);colRef.current=0;setCT(newQ.a);setIsAnim(false);setCombo(0);setPops2([]);
+    setShowMap(false);setChar("think");
+    setPhase("question");
+  }
+
+  function answerQ(idx){
+    if(picked!==null)return;
+    setPicked(idx);
+    if(idx===dQ.a){
+      SFX.correct();setChar("happy");
+      const bonus=attempt===0?3:0;
+      setTimeout(()=>{if(bonus)setMoves(m=>m+bonus);setPhase("playing");setChar("idle");},1700);
+    } else {
+      SFX.wrong();setChar("sad");
+      setTimeout(()=>{SFX.study();setStudyCD(attempt===0?5:3);setPhase("study");},1300);
+    }
+  }
+
+  function retryQ(){
+    // Shuffle the SAME question's options differently
+    const reshuffled=shuffleQ(q);
+    setDQ(reshuffled);setPicked(null);setAttempt(a=>a+1);setChar("think");setPhase("question");
+  }
+
+  async function clickTile(r,c){
+    if(isAnim||phase!=="playing")return;
+    if(!sel){SFX.select();setSel({r,c});return;}
+    if(sel.r===r&&sel.c===c){setSel(null);return;}
+    const dr=Math.abs(r-sel.r),dc=Math.abs(c-sel.c);
+    if(dr+dc!==1){SFX.select();setSel({r,c});return;}
+    const a=sel,b={r,c};setSel(null);setIsAnim(true);
+    const capMoves=moves,G=gRef.current,sw=swapC(board,a,b),fm=findM(sw,G);
+    if(!fm.size){SFX.invalid();setBoard(sw);setShakeTile(`${a.r},${a.c}`);await wait(220);setBoard(board);setShakeTile(null);setIsAnim(false);return;}
+    setBoard(sw);
+    let cur=sw,curM=fm,cbo=0,newCor=0;
+    while(curM.size){
+      setHi(curM);
+      let batch=0;curM.forEach(k=>{const[rr,cc]=k.split(",").map(Number);if(cur[rr][cc].type===ctRef.current)batch++;});
+      newCor+=batch;
+      if(batch>0){SFX.correct();addPop(`✓ +${batch} correct!`);setChar("happy");}else SFX.match();
+      if(cbo>=2){SFX.combo();addPop(`🔥 ${cbo+1}× COMBO!`);setChar("excited");}
+      await wait(380);cur=dropFill(cur,curM,G);setBoard(cur);setHi(new Set());cbo++;await wait(250);curM=findM(cur,G);
+    }
+    const newMoves=capMoves-1;setMoves(newMoves);
+    if(cbo>=2){setCombo(cbo);setTimeout(()=>setCombo(0),1400);}
+    setCol(prev=>{const nc=prev+newCor;colRef.current=nc;if(nc>=goalRef.current)setTimeout(()=>winLevel(nc),250);else if(newMoves<=0)setTimeout(()=>loseLevel(),250);return nc;});
+    setIsAnim(false);
+  }
+
+  function bubbleCollect(){
+    SFX.correct();setChar("happy");
+    setCol(prev=>{const nc=prev+1;colRef.current=nc;if(nc>=goalRef.current){setTimeout(()=>winLevel(nc),300);}return nc;});
+    addPop("✓ Popped!");
+  }
+
+  function winLevel(fc){
+    SFX.win();setChar("win");
+    const g=goalRef.current,pct=fc/g,s=pct>=1.5?3:pct>=1.2?2:1,lvl=lvlRef.current,best=Math.max(stars[lvl]||0,s),ns={...stars,[lvl]:best};
+    setStars(ns);setWinS(best);
+    const nextLevel=Math.max(level,lvl+1);
+    save({stars:ns,level:nextLevel,lives,usedQIds:usedRef.current});
+    spawnCF();setPhase("win");
+  }
+  function loseLevel(){SFX.lose();setChar("sad");const nl=Math.max(0,livRef.current-1);setLives(nl);livRef.current=nl;save({lives:nl,usedQIds:usedRef.current});if(nl<=0)setPhase("shop");else setPhase("lose");}
+
+  function buySession(){const ns=sessions+1;setSess(ns);setLives(5);livRef.current=5;save({sessions:ns,lives:5});setBuyStep(2);setTimeout(()=>{setBuyStep(0);setPhase("title");},2200);}
+
+  function buyPack(packIdx){
+    // Mock purchase — in production: PayFast R10
+    const gk=activeGrade||gradeKey;
+    const newPacks={...packs,[gk]:(packs[gk]||0)+1};
+    if(packIdx<=(newPacks[gk]||0)){// already covers this pack index
+      setPacks(newPacks);save({packs:newPacks});
+      setShowMap(false);setTimeout(()=>setShowMap(true),100);
+    }
+  }
+
+  function unlockGrade(gk){
+    // Mock R10 purchase — in production: PayFast
+    const newUnlocked=[...unlockedGrades,gk];setUnlockedGrades(newUnlocked);save({unlockedGrades:newUnlocked});setShowGradeShop(false);
+  }
+
+  function selectGradeToPlay(gk){
+    const gIdx=GRADE_ORDER.indexOf(gk),userIdx=GRADE_ORDER.indexOf(gradeKey);
+    const canPlay=gIdx<=userIdx||unlockedGrades.includes(gk);
+    if(!canPlay){setShowGradeShop(true);return;}
+    setActiveGrade(gk);save({activeGrade:gk});
+    // Reset level to 1 for that grade's first uncompleted level
+    setLevel(1);setPhase("title");
+  }
+
+  const toggleSound=()=>{const ns=!soundOn;setSoundOn(ns);save({soundOn:ns});if(ns)SFX.tap();};
+
+  const ct=TC[correctType],icons=SICONS[ldef?.subj||"Maths"],prog=Math.min(1,collected/goal);
+  const isSprint=ldef?.type==="sprint",isGiant=ldef?.type==="giant",accent=ldef?.accent||"#6d28d9";
+  const gradeInfo=GRADES.find(g=>g.key===gradeKey),activeGradeInfo=GRADES.find(g=>g.key==(activeGrade||gradeKey));
+  const totalStars=Object.values(stars).reduce((a,b)=>a+b,0);
+  const completedLevels=Object.keys(stars).filter(k=>stars[k]>0).length;
+  const extraPacks=packs[activeGrade||gradeKey]||0;
+  const totalLevels=(1+extraPacks)*PACK_SIZE;
+  const isPlayPhase=phase==="playing";
+
+  const Btn=({onClick,grad,children,mt=0,sm=false})=>(
+    <button onClick={()=>{SFX.tap();onClick();}} style={{display:"block",width:"100%",padding:sm?"11px":"15px",marginTop:mt,background:grad,borderRadius:16,color:"#fff",fontWeight:900,fontSize:sm?13:15,boxShadow:grad.includes("gradient")?"0 4px 18px #00000040":"none",transition:"transform .12s"}}
+      onMouseEnter={e=>e.currentTarget.style.transform="translateY(-2px)"}
+      onMouseLeave={e=>e.currentTarget.style.transform="translateY(0)"}>{children}</button>
+  );
+
+  return(
+    <div style={{fontFamily:"'Nunito',sans-serif",minHeight:"100dvh",width:"100%",background:"linear-gradient(155deg,#0d0b26 0%,#1b1550 45%,#150f3d 100%)",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:isPlayPhase?"flex-start":"center",padding:isPlayPhase?"0":"12px 10px",position:"relative",overflow:isPlayPhase?"hidden":"auto"}}>
+      <style>{CSS}</style>
+
+      {/* Confetti */}
+      {confetti.map(p=><div key={p.id} style={{position:"fixed",top:"-10px",left:`${p.x}%`,width:9,height:9,background:p.color,borderRadius:p.round?"50%":"2px",animation:`cfF ${p.dur}s ease ${p.delay}s both`,pointerEvents:"none",zIndex:999}}/>)}
+
+      {/* Score popups */}
+      {pops2.map(p=><div key={p.id} style={{position:"fixed",top:"38%",left:"50%",transform:"translateX(-50%)",fontSize:19,fontWeight:900,color:"#FFD700",textShadow:"0 2px 10px #0008",pointerEvents:"none",animation:"floatUp .9s ease forwards",zIndex:998,whiteSpace:"nowrap"}}>{p.text}</div>)}
+
+      {/* Akili character — shown during play and win/lose */}
+      {["playing","win","lose","question"].includes(phase)&&<AkiliChar key={charKey} mood={charMood} msg={charMsg}/>}
+
+      {/* Overlays */}
+      {showMap&&<LevelMap stars={stars} level={level} totalLevels={totalLevels} onSelect={lvl=>{SFX.tap();beginLevel(lvl);}} onClose={()=>setShowMap(false)} packs={packs} gradeKey={activeGrade||gradeKey} onBuyPack={buyPack}/>}
+      {showGradeShop&&<GradeShop userGrade={gradeKey} unlockedGrades={unlockedGrades} onUnlock={unlockGrade} onClose={()=>setShowGradeShop(false)}/>}
+
+      {/* Tutorial overlay */}
+      {showTut&&(()=>{const TUT=[{icon:"❓",title:"Step 1 — Answer First",body:"Every level starts with a curriculum question. Tap the answer you think is correct.",tip:"✅ Correct first try = +3 bonus moves!",color:"#6d28d9"},{icon:"📚",title:"Step 2 — Wrong = Study Time!",body:"Wrong answer? You go to Study Time. See the correct answer, wait for the countdown, then prove you know it before you can play.",tip:"🔁 You CANNOT play without answering correctly.",color:"#dc2626"},{icon:"🎯",title:"Step 3 — Tile Match",body:"Match tiles show the board's 4 answer choices. Match 3+ of the CORRECT answer tile type to collect them toward your goal.",tip:"💡 Correct tiles glow brighter. Chain combos for bonuses!",color:"#059669"},{icon:"⚡",title:"Step 4 — Bubble Pop",body:"On Sprint levels, bubbles float around the screen. Tap and pop the bubbles showing the CORRECT answer icon!",tip:"🎯 Don't pop wrong bubbles — focus on the correct one only!",color:"#0891b2"},{icon:"🗺️",title:"Step 5 — Levels & Grades",body:"25 levels per grade. Buy extra packs of 25 for R10 each (up to 30 packs). Unlock higher grades for R10. Lower grades are always free.",tip:"🏆 Complete all 25 base levels and try another grade!",color:"#7c3aed"}];
+      return(
+        <div style={{position:"fixed",inset:0,background:"#000000cc",display:"flex",alignItems:"center",justifyContent:"center",zIndex:500,padding:16}}>
+          <div style={{background:"linear-gradient(145deg,#1e1b4b,#2d2578)",borderRadius:24,padding:"20px 16px",maxWidth:380,width:"100%",border:`2px solid ${TUT[tutStep].color}`,animation:"studyIn .4s ease"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+              <span style={{color:"#64748b",fontSize:12,fontWeight:800}}>{tutStep+1}/{TUT.length}</span>
+              <button onClick={()=>setShowTut(false)} style={{background:"#ffffff18",borderRadius:8,padding:"4px 10px",color:"#94a3b8",fontSize:12,fontWeight:800}}>Skip ✕</button>
+            </div>
+            <div style={{textAlign:"center",marginBottom:12}}>
+              <div style={{fontSize:48,marginBottom:6}}>{TUT[tutStep].icon}</div>
+              <h3 style={{color:"#fff",fontWeight:900,fontSize:18,marginBottom:8}}>{TUT[tutStep].title}</h3>
+              <p style={{color:"#cbd5e1",fontSize:13,fontWeight:700,lineHeight:1.5,marginBottom:10}}>{TUT[tutStep].body}</p>
+              <div style={{background:`${TUT[tutStep].color}22`,border:`1px solid ${TUT[tutStep].color}55`,borderRadius:12,padding:"8px 12px"}}><p style={{color:"#6ee7b7",fontSize:12,fontWeight:800}}>{TUT[tutStep].tip}</p></div>
+            </div>
+            <div style={{display:"flex",gap:5,justifyContent:"center",marginBottom:12}}>{TUT.map((_,i)=><div key={i} style={{width:i===tutStep?18:7,height:7,borderRadius:4,background:i===tutStep?TUT[tutStep].color:"#ffffff20",transition:"all .2s"}}/>)}</div>
+            <div style={{display:"flex",gap:8}}>
+              {tutStep>0&&<button onClick={()=>setTutStep(t=>t-1)} style={{flex:1,padding:"12px",background:"#ffffff18",borderRadius:14,color:"#fff",fontWeight:800,fontSize:14}}>← Back</button>}
+              {tutStep<TUT.length-1
+                ?<button onClick={()=>setTutStep(t=>t+1)} style={{flex:2,padding:"12px",background:`linear-gradient(135deg,${TUT[tutStep].color},${TUT[Math.min(tutStep+1,TUT.length-1)].color})`,borderRadius:14,color:"#fff",fontWeight:900,fontSize:14}}>Next →</button>
+                :<button onClick={()=>setShowTut(false)} style={{flex:2,padding:"12px",background:"linear-gradient(135deg,#16a34a,#15803d)",borderRadius:14,color:"#fff",fontWeight:900,fontSize:14}}>Play Now! 🎮</button>}
+            </div>
+          </div>
+        </div>
+      );})()}
+
+      {/* STUDY TIME */}
+      {phase==="study"&&q&&(
+        <div style={{position:"fixed",inset:0,background:"linear-gradient(135deg,#1a0505,#2d0808)",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:20,zIndex:300,animation:"studyIn .4s ease"}}>
+          <div style={{fontSize:50,marginBottom:6}}>📚</div>
+          <h2 style={{color:"#ff6b6b",fontWeight:900,fontSize:26,marginBottom:6}}>Study Time!</h2>
+          <p style={{color:"#94a3b8",marginBottom:16,textAlign:"center",fontSize:15,fontWeight:700}}>Wrong answer. Study the correct answer, then prove you know it.</p>
+          <div style={{background:"#16a34a",borderRadius:20,padding:"18px 24px",marginBottom:20,border:"3px solid #4ade80",textAlign:"center",maxWidth:320,width:"100%",animation:"breathe 2s ease infinite"}}>
+            <p style={{color:"#dcfce7",fontSize:14,fontWeight:700,marginBottom:6,opacity:.8}}>{q.q}</p>
+            <p style={{color:"#fff",fontWeight:900,fontSize:26,lineHeight:1.2}}>{q.opts[q.a]}</p>
+          </div>
+          <svg width="64" height="64" style={{marginBottom:10}}>
+            <circle cx="32" cy="32" r="26" fill="none" stroke="#ffffff15" strokeWidth="6"/>
+            <circle cx="32" cy="32" r="21" fill="#ffffff0a"/>
+            <text x="32" y="38" textAnchor="middle" fill="#FFD700" fontSize="22" fontWeight="900" fontFamily="Nunito,sans-serif">{studyCD}</text>
+          </svg>
+          <p style={{color:"#64748b",fontSize:15,fontWeight:700,textAlign:"center"}}>Retry in {studyCD}s…</p>
+        </div>
+      )}
+
+      {/* GRADE SELECT */}
+      {phase==="gradeSelect"&&(
+        <div style={{textAlign:"center",animation:"slideUp .5s ease",maxWidth:400,width:"100%"}}>
+          <div style={{fontSize:54,marginBottom:4}}>🦁</div>
+          <h1 style={{fontSize:30,fontWeight:900,background:"linear-gradient(135deg,#FFD700,#FF9B45,#FF5F5F)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",marginBottom:4}}>AKILI MATCH</h1>
+          <p style={{color:"#a78bfa",fontWeight:800,fontSize:10,letterSpacing:3,marginBottom:18}}>ANSWER · MATCH · LEARN</p>
+          <div style={{background:"#ffffff10",borderRadius:22,padding:"16px",marginBottom:14,border:"1px solid #ffffff1e"}}>
+            <p style={{color:"#fff",fontWeight:900,fontSize:16,marginBottom:4}}>What grade are you in?</p>
+            <p style={{color:"#64748b",fontSize:12,fontWeight:700,marginBottom:14}}>Questions match your grade · 25 levels free · More available to buy</p>
+            <div style={{display:"flex",flexDirection:"column",gap:8}}>
+              {GRADES.map(g=>(
+                <button key={g.key} onClick={()=>{SFX.tap();setGradeKey(g.key);setActiveGrade(g.key);save({gradeKey:g.key,activeGrade:g.key});setPhase("title");}} style={{background:"linear-gradient(135deg,#1e1b4b,#312e81)",borderRadius:14,padding:"12px 14px",border:"2px solid #4f46e5",color:"#fff",display:"flex",alignItems:"center",gap:11,textAlign:"left",width:"100%"}}>
+                  <span style={{fontSize:24}}>{g.icon}</span>
+                  <div><div style={{fontWeight:900,fontSize:14}}>{g.label}</div><div style={{color:"#a78bfa",fontSize:11,fontWeight:700}}>{g.sub} · 25 free levels</div></div>
+                </button>
+              ))}
+            </div>
+          </div>
+          <button onClick={()=>{setTutStep(0);setShowTut(true);}} style={{background:"#ffffff12",borderRadius:14,padding:"11px",color:"#a78bfa",fontWeight:800,fontSize:14,width:"100%",border:"1px solid #ffffff18"}}>❓ How to Play</button>
+        </div>
+      )}
+
+      {/* TITLE */}
+      {phase==="title"&&(
+        <div style={{textAlign:"center",animation:"slideUp .5s ease",maxWidth:390,width:"100%"}}>
+          {/* Header */}
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+            <div style={{display:"flex",alignItems:"center",gap:7}}>
+              <span style={{fontSize:26}}>🦁</span>
+              <div style={{textAlign:"left"}}>
+                <div style={{fontSize:18,fontWeight:900,background:"linear-gradient(135deg,#FFD700,#FF9B45)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent"}}>AKILI MATCH</div>
+                <div style={{color:"#64748b",fontSize:9,fontWeight:800,letterSpacing:2}}>ANSWER · MATCH · LEARN</div>
+              </div>
+            </div>
+            <button onClick={toggleSound} style={{background:"#ffffff14",borderRadius:12,padding:"7px 11px",color:"#fff",fontWeight:800,fontSize:15,border:"1px solid #ffffff18"}}>{soundOn?"🔊":"🔇"}</button>
+          </div>
+
+          {/* Grade selector row */}
+          <div style={{display:"flex",gap:8,marginBottom:10}}>
+            <div style={{flex:1,background:"#ffffff0e",borderRadius:14,padding:"8px 12px",border:"1px solid #ffffff14",cursor:"pointer",display:"flex",alignItems:"center",gap:6}} onClick={()=>{SFX.tap();setPhase("gradeSelect");}}>
+              <span style={{fontSize:16}}>{gradeInfo?.icon}</span>
+              <div style={{flex:1,textAlign:"left"}}>
+                <div style={{color:"#fff",fontWeight:800,fontSize:12}}>{gradeInfo?.label}</div>
+                <div style={{color:"#64748b",fontSize:12,fontWeight:700}}>My Grade ✏️</div>
+              </div>
+            </div>
+            <div style={{flex:1,background:"#ffffff0e",borderRadius:14,padding:"8px 12px",border:"1px solid #ffffff14",cursor:"pointer",display:"flex",alignItems:"center",gap:6}} onClick={()=>{SFX.tap();setShowGradeShop(true);}}>
+              <span style={{fontSize:16}}>🎓</span>
+              <div style={{flex:1,textAlign:"left"}}>
+                <div style={{color:"#fff",fontWeight:800,fontSize:14}}>Other Grades</div>
+                <div style={{color:"#64748b",fontSize:12,fontWeight:700}}>R10 each 🔒</div>
+              </div>
+            </div>
+          </div>
+
+          {/* Progress section */}
+          <div style={{background:"#ffffff0e",borderRadius:18,padding:"12px 14px",marginBottom:10,border:"1px solid #ffffff14",cursor:"pointer"}} onClick={()=>{SFX.tap();setShowMap(true);}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+              <span style={{color:"#fff",fontWeight:900,fontSize:14}}>📍 Progress — {activeGradeInfo?.label}</span>
+              <span style={{color:"#a78bfa",fontWeight:800,fontSize:15}}>Level {level} / {totalLevels}</span>
+            </div>
+            <div style={{background:"#ffffff14",borderRadius:999,height:9,overflow:"hidden",marginBottom:6}}>
+              <div style={{width:`${Math.min(100,(level-1)/totalLevels*100)}%`,height:"100%",background:"linear-gradient(90deg,#6d28d9,#FFD700)",borderRadius:999,transition:"width .4s"}}/>
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:3,marginBottom:4}}>
+              {Array.from({length:Math.min(totalLevels,25)},(_,i)=>{const lvl=i+1,s=stars[lvl]||0,done=s>0,cur=lvl===level;return<div key={lvl} style={{aspectRatio:"1",borderRadius:5,background:cur?"#FFD700":done?"#6d28d9":"#ffffff0a",border:cur?"2px solid #fff":"none",opacity:lvl>level?0.3:1,display:"flex",alignItems:"center",justifyContent:"center"}}><span style={{fontSize:7,fontWeight:900,color:cur?"#1a1a2e":done?"#fff":"#374151"}}>{lvl}</span></div>;})}
+            </div>
+            <p style={{color:"#64748b",fontSize:13,fontWeight:700,textAlign:"center"}}>{completedLevels}/{totalLevels} completed · {totalStars}⭐ · Tap to open full map</p>
+          </div>
+
+          {/* Next level card */}
+          {(()=>{const def=getLDef(level);return(
+            <div style={{background:"#ffffff0e",borderRadius:16,padding:"11px 14px",marginBottom:10,border:`1px solid ${def.accent}44`}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
+                <div style={{display:"flex",alignItems:"center",gap:6}}><span style={{fontSize:16}}>{def.icon}</span><span style={{color:"#fff",fontWeight:900,fontSize:14}}>Level {level}</span><span style={{background:def.accent,color:"#fff",padding:"3px 10px",borderRadius:20,fontSize:13,fontWeight:900}}>{def.name}</span></div>
+                <div style={{display:"flex",gap:4}}>{def.game==="bubble"&&<span style={{color:"#ef4444",fontWeight:900,fontSize:13,animation:"sprintPulse 1s ease infinite"}}>⚡ BUBBLE</span>}{def.type==="giant"&&<span style={{color:"#059669",fontWeight:900,fontSize:13}}>🌍 GIANT</span>}</div>
+              </div>
+              <div style={{display:"flex",gap:10,justifyContent:"center",marginBottom:5}}>
+                {[{l:"Board",v:`${def.G}×${def.G}`},{l:"Goal",v:`${def.goal} tiles`},{l:"Moves",v:def.moves},{l:"Subject",v:def.subj||"Any"}].map(({l,v})=>(
+                  <div key={l} style={{textAlign:"center"}}><div style={{color:"#fff",fontWeight:900,fontSize:14}}>{v}</div><div style={{color:"#64748b",fontSize:11,fontWeight:800}}>{l}</div></div>
+                ))}
+              </div>
+              <div style={{display:"flex",gap:4,justifyContent:"center"}}>{[1,2,3].map(s=><span key={s} style={{fontSize:15,filter:(stars[level]||0)>=s?"none":"grayscale(1) opacity(.25)"}}>⭐</span>)}</div>
+            </div>
+          );})()}
+
+          {/* Stats row */}
+          <div style={{display:"flex",gap:7,justifyContent:"center",marginBottom:10}}>
+            {[{icon:"❤️",val:lives,lab:"Lives"},{icon:"🎫",val:sessions,lab:"Sessions"},{icon:"⭐",val:totalStars,lab:"Stars"}].map(({icon,val,lab})=>(
+              <div key={lab} style={{flex:1,background:"#ffffff0e",borderRadius:13,padding:"7px 4px",border:"1px solid #ffffff12",textAlign:"center"}}>
+                <div style={{fontSize:16}}>{icon}</div><div style={{color:"#fff",fontWeight:900,fontSize:18}}>{val}</div><div style={{color:"#64748b",fontSize:11,fontWeight:800}}>{lab}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Action buttons */}
+          <Btn onClick={()=>beginLevel(level)} grad="linear-gradient(135deg,#6d28d9,#4f46e5)">🎮 PLAY LEVEL {level} / {totalLevels}</Btn>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:7,marginTop:8}}>
+            <button onClick={()=>{SFX.tap();setTutStep(0);setShowTut(true);}} style={{padding:"11px",background:"#ffffff12",borderRadius:13,color:"#a78bfa",fontWeight:800,fontSize:12,border:"1px solid #ffffff18"}}>❓ How to Play</button>
+            <button onClick={()=>{SFX.tap();setShowMap(true);}} style={{padding:"11px",background:"#ffffff12",borderRadius:13,color:"#6ee7b7",fontWeight:800,fontSize:12,border:"1px solid #ffffff18"}}>🗺️ Level Map</button>
+            <button onClick={()=>{SFX.tap();setBuyStep(0);setPhase("shop");}} style={{padding:"11px",background:"linear-gradient(135deg,#b45309,#d97706)",borderRadius:13,color:"#fff",fontWeight:900,fontSize:12}}>🛒 Shop</button>
+          </div>
+        </div>
+      )}
+
+      {/* QUESTION */}
+      {phase==="question"&&dQ&&ldef&&(
+        <div style={{maxWidth:430,width:"100%",animation:"slideUp .4s ease"}}>
+          <BackBtn onClick={goToMenu}/>
+          <div style={{background:"linear-gradient(145deg,#1e1b4b,#2d2578)",borderRadius:24,padding:"16px 14px",border:`2px solid ${accent}`,boxShadow:"0 20px 60px #000a"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+              <div style={{display:"flex",gap:5}}><span style={{background:accent,color:"#fff",padding:"4px 12px",borderRadius:20,fontSize:13,fontWeight:900}}>LV {level}/{totalLevels}</span>{ldef.game==="bubble"&&<span style={{background:"#dc2626",color:"#fff",padding:"4px 12px",borderRadius:20,fontSize:14,fontWeight:900,animation:"sprintPulse 1s ease infinite"}}>⚡</span>}{isGiant&&<span style={{background:"#059669",color:"#fff",padding:"4px 12px",borderRadius:20,fontSize:14,fontWeight:900}}>🌍</span>}</div>
+              <span style={{background:"#ffffff14",color:"#a78bfa",padding:"4px 12px",borderRadius:20,fontSize:13,fontWeight:800}}>📚 {dQ.s}</span>
+            </div>
+            {attempt>0&&<div style={{background:"#dc262620",border:"1px solid #dc262660",borderRadius:10,padding:"5px 12px",marginBottom:8,textAlign:"center"}}><span style={{color:"#fca5a5",fontSize:14,fontWeight:800}}>🔁 Attempt {attempt+1} — answer correctly to play!</span></div>}
+            <p style={{color:"#fff",fontWeight:900,fontSize:22,textAlign:"center",marginBottom:6,lineHeight:1.35}}>{dQ.q}</p>
+            {attempt===0&&<p style={{color:"#6ee7b7",fontWeight:800,fontSize:14,textAlign:"center",marginBottom:10}}>✨ Correct first try = +3 bonus moves!</p>}
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:7}}>
+              {dQ.opts.map((opt,i)=>{
+                const t=TC[i],correct=i===dQ.a,chosen=picked===i,show=picked!==null;
+                const bg=show?(correct?"#16a34a":chosen?"#dc2626":t.bg):t.bg;
+                const origIdx=q.opts.indexOf(opt),icon=(SICONS[dQ.s]||SICONS.Maths)[origIdx>=0?origIdx:i];
+                return<button key={i} onClick={()=>answerQ(i)} style={{background:bg,borderRadius:14,padding:"11px 8px",color:"#fff",fontWeight:900,fontSize:13,transition:"background .3s",border:chosen?"3px solid #fff":`3px solid ${t.sh}44`,display:"flex",alignItems:"center",gap:7}}>
+                  <span style={{fontSize:22,flexShrink:0}}>{icon}</span>
+                  <span style={{flex:1,textAlign:"left",fontSize:15,lineHeight:1.25}}>{opt}</span>
+                </button>;
+              })}
+            </div>
+            {picked!==null&&<div style={{marginTop:10,textAlign:"center",animation:"slideUp .35s ease"}}>
+              <p style={{fontWeight:900,fontSize:16,color:picked===dQ.a?"#6ee7b7":"#fca5a5"}}>{picked===dQ.a?`🎉 Correct!${attempt===0?" +3 Bonus Moves!":""}`:` ❌ Wrong! Going to Study Time…`}</p>
+              {picked===dQ.a&&<p style={{color:"#a78bfa",fontSize:14,fontWeight:800,marginTop:6}}>Now {ldef.game==="bubble"?"pop the":"match the"} <strong style={{color:TC[q.a].sh}}>{SICONS[q.s||"Maths"][q.a]}</strong> tiles!</p>}
+            </div>}
+          </div>
+        </div>
+      )}
+
+      {/* PLAYING */}
+      {phase==="playing"&&q&&ldef&&(
+        <div style={{position:"fixed",inset:0,display:"flex",flexDirection:"column",padding:"8px 8px 6px",gap:"4px",background:"linear-gradient(155deg,#0d0b26 0%,#1b1550 45%,#150f3d 100%)",overflow:"hidden"}}>
+          {/* Sprint/Giant banners */}
+          {ldef.game==="bubble"&&<div style={{background:"#dc2626",borderRadius:10,padding:"4px",display:"flex",alignItems:"center",justifyContent:"center",gap:5,animation:"sprintPulse 1s ease infinite",flexShrink:0}}><span style={{fontSize:12}}>⚡</span><span style={{color:"#fff",fontWeight:900,fontSize:14}}>BUBBLE POP — tap the correct bubbles!</span></div>}
+          {isGiant&&ldef.game!=="bubble"&&<div style={{background:"#065f46",borderRadius:10,padding:"4px",display:"flex",alignItems:"center",justifyContent:"center",gap:5,flexShrink:0}}><span style={{fontSize:12}}>🌍</span><span style={{color:"#fff",fontWeight:900,fontSize:14}}>GIANT BOARD — {boardG}×{boardG} grid!</span></div>}
+
+          {/* HUD */}
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:5,flexShrink:0}}>
+            <button onClick={goToMenu} style={{background:"#ffffff14",borderRadius:10,padding:"6px 10px",color:"#fff",fontWeight:900,fontSize:15,border:"1px solid #ffffff22",display:"flex",alignItems:"center",gap:4}}>🏠 Menu</button>
+            <div style={{display:"flex",gap:5,alignItems:"center"}}>
+              {[{icon:"❤️",val:lives,col:"#ff6b6b"},{icon:"🎯",val:moves,col:ldef.game==="bubble"?"#ef4444":"#6ee7b7"}].map(({icon,val,col})=>(
+                <div key={icon} style={{background:"#ffffff14",borderRadius:11,padding:"4px 9px",display:"flex",alignItems:"center",gap:3,border:"1px solid #ffffff18"}}><span style={{fontSize:12}}>{icon}</span><span style={{color:col,fontWeight:900,fontSize:16}}>{val}</span></div>
+              ))}
+              <div style={{background:"#ffffff14",borderRadius:11,padding:"4px 8px",display:"flex",alignItems:"center",gap:2,border:"1px solid #ffffff18"}}><span style={{color:"#64748b",fontSize:12,fontWeight:700}}>Lv</span><span style={{color:"#fff",fontWeight:900,fontSize:15}}>{level}/{totalLevels}</span></div>
+              <button onClick={toggleSound} style={{background:"#ffffff14",borderRadius:9,padding:"4px 7px",color:"#fff",fontWeight:800,fontSize:14,border:"none"}}>{soundOn?"🔊":"🔇"}</button>
+            </div>
+          </div>
+
+          {/* Question reminder */}
+          <div style={{background:"#ffffff0c",borderRadius:10,padding:"4px 9px",flexShrink:0,border:"1px solid #ffffff12",display:"flex",alignItems:"center",gap:5}}>
+            <span style={{fontSize:16}}>{SICONS[q.s||"Maths"][q.a]}</span>
+            <span style={{color:"#cbd5e1",fontSize:14,fontWeight:700,flex:1,lineHeight:1.3}}>{q.q}</span>
+          </div>
+
+          {/* BUBBLE POP game */}
+          {ldef.game==="bubble"&&(
+            <BubblePop q={q} correctType={correctType} goal={goal} collected={collected} onCollect={bubbleCollect} onWrongTap={()=>{SFX.invalid();}} icons={icons} accent={accent}/>
+          )}
+
+          {/* TILE MATCH game */}
+          {ldef.game==="match"&&(
+            <>
+              {/* Goal bar */}
+              <div style={{background:"#ffffff0c",borderRadius:11,padding:"6px 11px",flexShrink:0,border:`1.5px solid ${ct.bg}44`}}>
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:3}}>
+                  <div style={{display:"flex",alignItems:"center",gap:5}}><span style={{color:"#e2e8f0",fontSize:14,fontWeight:800}}>Collect</span><div style={{width:36,height:36,borderRadius:10,background:`linear-gradient(145deg,${ct.sh},${ct.bg})`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:20}}>{icons[correctType]}</div><span style={{color:"#e2e8f0",fontSize:14,fontWeight:800}}>tiles</span></div>
+                  <span style={{color:ct.sh,fontWeight:900,fontSize:18}}>{collected}/{goal}</span>
+                </div>
+                <div style={{background:"#ffffff14",borderRadius:999,height:8,overflow:"hidden"}}><div style={{width:`${prog*100}%`,height:"100%",borderRadius:999,background:`linear-gradient(90deg,${ct.bg},${ct.sh})`,transition:"width .4s ease"}}/></div>
+                <div style={{marginTop:3,fontSize:13,color:"#94a3b8",fontWeight:700}}>{icons[correctType]} = <strong style={{color:ct.sh}}>{q.opts[correctType]}</strong></div>
+              </div>
+              {combo>=2&&<div style={{textAlign:"center",fontWeight:900,fontSize:19,color:"#FFD700",animation:"popIn .3s ease",textShadow:"0 2px 12px #FFD70090",flexShrink:0}}>🔥 {combo}× COMBO!</div>}
+              {/* Board */}
+              <div style={{flex:1,minHeight:0,display:"flex",alignItems:"center",justifyContent:"center",overflow:"hidden"}}>
+                <div style={{width:"min(calc(100vw - 16px), 480px)",aspectRatio:"1",maxHeight:"100%"}}>
+                  <div style={{display:"grid",gridTemplateColumns:`repeat(${boardG},1fr)`,gap:"min(1vw,5px)",width:"100%",height:"100%"}}>
+                    {board.map((row,r)=>row.map((tile,c)=>{
+                      const key=`${r},${c}`,isSel=sel?.r===r&&sel?.c===c,isHi=hi.has(key),isSh=shakeTile===key,isCor=tile.type===correctType,t=TC[tile.type],icon=icons[tile.type]||"?",text=abbr(q.opts[tile.type],boardG);
+                      return<div key={tile.id} onClick={()=>clickTile(r,c)} className={`tile${isSel?" t-sel":""}${isHi?" t-glow":""}${isSh?" t-shake":""}`}
+                        style={{borderRadius:"min(2.5vw,10px)",background:isHi?`radial-gradient(circle at 40% 30%,${t.sh},${t.bg})`:`linear-gradient(145deg,${t.sh},${t.bg})`,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",border:isSel?"2.5px solid #fff":isCor?`2.5px solid ${t.sh}`:"2.5px solid transparent",boxShadow:isSel?`0 0 0 2px ${t.bg},0 4px 14px ${t.bg}77`:isCor?`0 0 8px ${t.bg}99`:"0 2px 4px #0004",opacity:isCor?1:0.68,padding:"1px",gap:"1px"}}>
+                        <span style={{fontSize:`min(${boardG>=8?"6vw":"7.2vw"},${boardG>=8?"26px":"32px"})`,lineHeight:1}}>{icon}</span>
+                        {text&&<span style={{fontSize:`min(${boardG>=7?"3vw":"3.5vw"},${boardG>=7?"12px":"14px"})`,color:"#fff",fontWeight:900,textShadow:"0 1px 3px #0008",lineHeight:1,textAlign:"center"}}>{text}</span>}
+                      </div>;}))
+                    }
+                  </div>
+                </div>
+              </div>
+              {/* Legend */}
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:4,flexShrink:0,pointerEvents:"none"}}>
+                {TC.map((t,i)=><div key={i} style={{display:"flex",alignItems:"center",gap:5,background:i===correctType?`${t.bg}28`:"#ffffff08",borderRadius:9,padding:"4px 8px",border:i===correctType?`1.5px solid ${t.bg}88`:"1.5px solid transparent"}}><span style={{fontSize:16,flexShrink:0}}>{icons[i]}</span><span style={{color:i===correctType?t.sh:"#475569",fontWeight:i===correctType?900:700,fontSize:10,overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis",flex:1}}>{q.opts[i]}{i===correctType&&" ✓"}</span></div>)}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* WIN */}
+      {phase==="win"&&ldef&&(
+        <div style={{textAlign:"center",animation:"slideUp .5s ease",maxWidth:370,width:"100%"}}>
+          <BackBtn onClick={goToMenu}/>
+          <div style={{fontSize:70,marginBottom:4,animation:"popIn .6s ease"}}>🏆</div>
+          <h2 style={{fontSize:30,fontWeight:900,background:"linear-gradient(135deg,#FFD700,#FF9B45)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent"}}>LEVEL DONE!</h2>
+          <div style={{display:"inline-flex",alignItems:"center",gap:6,marginTop:4,marginBottom:10,background:"#ffffff12",borderRadius:20,padding:"4px 14px"}}><span style={{fontSize:18}}>{ldef.icon}</span><span style={{color:"#a78bfa",fontWeight:800,fontSize:15}}>{ldef.name} — {level}/{totalLevels}</span></div>
+          {q&&<div style={{background:"#ffffff10",borderRadius:14,padding:"9px 14px",marginBottom:10,border:"1px solid #ffffff18"}}><p style={{color:"#94a3b8",fontSize:14,fontWeight:700,marginBottom:3}}>{q.q}</p><p style={{color:"#6ee7b7",fontWeight:900,fontSize:18}}>✓ {q.opts[correctType]}</p></div>}
+          <div style={{display:"flex",gap:8,justifyContent:"center",marginBottom:10}}>{[1,2,3].map((s,i)=><span key={s} style={{fontSize:36,display:"inline-block",filter:winStars>=s?"none":"grayscale(1) opacity(.2)",animation:winStars>=s?`starPop .45s ease ${i*.18}s both`:"none"}}>⭐</span>)}</div>
+          {level<totalLevels?<div style={{background:"#ffffff10",borderRadius:14,padding:"7px 14px",marginBottom:10,border:"1px solid #ffffff18"}}><p style={{color:"#6ee7b7",fontWeight:900,fontSize:16}}>{totalLevels-level} levels left to go!</p></div>:<div style={{background:"#FFD70022",borderRadius:14,padding:"8px 14px",marginBottom:10,border:"2px solid #FFD70066"}}><p style={{color:"#FFD700",fontWeight:900,fontSize:14}}>🎓 All {totalLevels} levels done! Buy more packs or try another grade!</p></div>}
+          {level<totalLevels&&<Btn onClick={()=>beginLevel(level+1)} grad="linear-gradient(135deg,#6d28d9,#4f46e5)">Next Level ({level+1}/{totalLevels}) →</Btn>}
+          {level>=totalLevels&&<Btn onClick={()=>setPhase("shop")} grad="linear-gradient(135deg,#b45309,#f59e0b)">🛒 Buy 25 More Levels — R10</Btn>}
+          <Btn onClick={()=>beginLevel(level)} grad="linear-gradient(135deg,#0f766e,#0891b2)" mt={8} sm>Play Level Again</Btn>
+          <Btn onClick={()=>{SFX.tap();setShowMap(true);setPhase("title");}} grad="#ffffff14" mt={8} sm>🗺️ View Level Map</Btn>
+        </div>
+      )}
+
+      {/* LOSE */}
+      {phase==="lose"&&(
+        <div style={{textAlign:"center",animation:"slideUp .5s ease",maxWidth:370,width:"100%"}}>
+          <BackBtn onClick={goToMenu}/>
+          <div style={{fontSize:64,marginBottom:6}}>😔</div>
+          <h2 style={{color:"#ff6b6b",fontSize:26,fontWeight:900,marginBottom:6}}>SO CLOSE!</h2>
+          <p style={{color:"#94a3b8",fontSize:15,marginBottom:6}}>{collected} of {goal} correct {ldef?.game==="bubble"?"pops":"tiles"}</p>
+          {q&&<div style={{background:"#ffffff0c",borderRadius:14,padding:"9px 12px",marginBottom:8,border:"1px solid #ffffff14"}}><p style={{color:"#94a3b8",fontSize:14,fontWeight:700,marginBottom:3}}>{q.q}</p><p style={{color:"#6ee7b7",fontWeight:900,fontSize:16}}>✓ {q.opts[correctType]}</p></div>}
+          <p style={{color:"#fca5a5",fontWeight:800,fontSize:15,marginBottom:12}}>❤️ Lives: {lives} &nbsp;·&nbsp; Level {level}/{totalLevels}</p>
+          <Btn onClick={()=>beginLevel(level)} grad="linear-gradient(135deg,#6d28d9,#4f46e5)">🔁 Try Again</Btn>
+          <Btn onClick={()=>{SFX.tap();setBuyStep(0);setPhase("shop");}} grad="linear-gradient(135deg,#b45309,#f59e0b)" mt={8} sm>🎫 Buy Extra Session — R5</Btn>
+          <Btn onClick={goToMenu} grad="#ffffff14" mt={8} sm>🏠 Main Menu</Btn>
+        </div>
+      )}
+
+      {/* SHOP */}
+      {phase==="shop"&&(
+        <div style={{textAlign:"center",animation:"slideUp .45s ease",maxWidth:390,width:"100%"}}>
+          <BackBtn onClick={goToMenu}/>
+          {buyStep===2
+            ?<div style={{animation:"popIn .5s ease"}}><div style={{fontSize:74}}>🎉</div><h2 style={{color:"#6ee7b7",fontSize:26,fontWeight:900,marginTop:8}}>Payment Successful!</h2><p style={{color:"#fff",marginTop:10}}>Added · Enjoy playing!</p></div>
+            :<>
+              <h2 style={{color:"#FFD700",fontSize:26,fontWeight:900,marginBottom:4}}>🛒 Akili Shop</h2>
+              <p style={{color:"#94a3b8",marginBottom:14,fontSize:13}}>Lives, level packs, and grade unlocks</p>
+
+              {/* Sessions / Lives */}
+              <div style={{background:"linear-gradient(145deg,#1e1b4b,#312e81)",borderRadius:20,padding:"18px 16px",marginBottom:10,border:"2px solid #4f46e5"}}>
+                <div style={{fontSize:36,marginBottom:6}}>🎫</div>
+                <div style={{color:"#fff",fontWeight:900,fontSize:17,marginBottom:8}}>Extra Session — 5 Lives</div>
+                {["5 extra lives","Keep all progress","Instant access"].map(f=><p key={f} style={{color:"#a78bfa",fontWeight:700,fontSize:14,marginBottom:4}}>✓ {f}</p>)}
+                <div style={{marginTop:8,fontSize:30,fontWeight:900,color:"#FFD700"}}>R5.00</div>
+              </div>
+
+              {/* Level packs */}
+              <div style={{background:"linear-gradient(145deg,#1a2e1e,#0d3320)",borderRadius:20,padding:"18px 16px",marginBottom:10,border:"2px solid #059669"}}>
+                <div style={{fontSize:36,marginBottom:6}}>📦</div>
+                <div style={{color:"#fff",fontWeight:900,fontSize:17,marginBottom:8}}>25 New Levels Pack</div>
+                {["25 brand-new levels","Different questions in every pack","Up to 30 packs per grade","Same great game, new challenges"].map(f=><p key={f} style={{color:"#6ee7b7",fontWeight:700,fontSize:14,marginBottom:4}}>✓ {f}</p>)}
+                <div style={{marginTop:8,fontSize:30,fontWeight:900,color:"#6ee7b7"}}>R10.00</div>
+              </div>
+
+              {/* Higher grade unlock */}
+              <div style={{background:"linear-gradient(145deg,#2a1a08,#3d2210)",borderRadius:20,padding:"18px 16px",marginBottom:14,border:"2px solid #b45309"}}>
+                <div style={{fontSize:36,marginBottom:6}}>🎓</div>
+                <div style={{color:"#fff",fontWeight:900,fontSize:17,marginBottom:8}}>Unlock Higher Grade</div>
+                {["Access a harder grade level","25 free levels + buyable packs","Harder questions, bigger challenge"].map(f=><p key={f} style={{color:"#FCD34D",fontWeight:700,fontSize:14,marginBottom:4}}>✓ {f}</p>)}
+                <div style={{marginTop:8,fontSize:30,fontWeight:900,color:"#FCD34D"}}>R10.00</div>
+              </div>
+
+              {buyStep===0&&(
+                <>
+                  <Btn onClick={()=>setBuyStep(1)} grad="linear-gradient(135deg,#b45309,#f59e0b)">Proceed to Payment</Btn>
+                  <Btn onClick={goToMenu} grad="#ffffff14" mt={8} sm>🏠 Back to Menu</Btn>
+                </>
+              )}
+              {buyStep===1&&(
+                <div style={{animation:"slideUp .35s ease"}}>
+                  <div style={{background:"#ffffff0e",borderRadius:18,padding:14,border:"1px solid #ffffff1a",marginBottom:12,textAlign:"left"}}>
+                    <p style={{color:"#fff",fontWeight:900,marginBottom:7}}>💳 Payment</p>
+                    <div style={{background:"#0f172a",borderRadius:12,padding:10,fontSize:12,color:"#94a3b8",marginBottom:8,lineHeight:1.8}}><span style={{color:"#fff",fontWeight:800}}>R5</span> = 1 Session (5 lives)<br/><span style={{color:"#fff",fontWeight:800}}>R10</span> = 25 Level Pack or Grade Unlock<br/><span style={{color:"#fff",fontWeight:800}}>Gateway:</span> PayFast / Yoco / SnapScan</div>
+                    <p style={{color:"#64748b",fontSize:11,fontWeight:700}}>⚡ Connects to <strong style={{color:"#a78bfa"}}>PayFast</strong> or <strong style={{color:"#a78bfa"}}>Yoco</strong> in production.</p>
+                  </div>
+                  <Btn onClick={buySession} grad="linear-gradient(135deg,#16a34a,#15803d)">✓ Confirm R5 Session</Btn>
+                  <Btn onClick={()=>setBuyStep(0)} grad="#ffffff14" mt={8} sm>← Back</Btn>
+                </div>
+              )}
+            </>
+          }
+        </div>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
